@@ -1,7 +1,0 @@
-{
-  "mcpServers": {
-    "skyeng-db-server": {
-      "command": "/your/path/mcp-smartroom-db/mcp-server"
-    }
-  }
-}

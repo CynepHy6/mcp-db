@@ -47,26 +47,19 @@ class DatabaseManager:
         # Приоритет поиска конфигурации:
         # 1. Параметр config_path
         # 2. Переменная окружения MCP_DB_CONFIG
-        # 3. Локальный .db.yaml
-        # 4. Глобальный ~/.config/mcp-skyeng-db/.db.yaml
+        # 3. Локальный .db.yaml рядом с сервером
         if config_path:
             self.config_path = config_path
         elif os.getenv("MCP_DB_CONFIG"):
             self.config_path = os.getenv("MCP_DB_CONFIG")
-        elif os.path.exists(os.path.join(script_dir, ".db.yaml")):
-            self.config_path = os.path.join(script_dir, ".db.yaml")
-        elif os.path.exists(os.path.expanduser("~/.config/mcp-skyeng-db/.db.yaml")):
-            self.config_path = os.path.expanduser("~/.config/mcp-skyeng-db/.db.yaml")
         else:
-            self.config_path = os.path.join(script_dir, ".db.yaml")  # Fallback
+            self.config_path = os.path.join(script_dir, ".db.yaml")
         self.connections: Dict[str, Dict] = {}
         self.schema_cache: Dict[str, Dict] = {}
         # Таймаут подключения (секунды), можно переопределить через MCP_DB_CONNECT_TIMEOUT
         self.connect_timeout = int(os.getenv("MCP_DB_CONNECT_TIMEOUT", "2"))
         logger.info(f"Таймаут подключения к БД установлен: {self.connect_timeout} сек")
         self._load_db_config()
-
-
 
     def _load_db_config(self):
         """Загружает конфигурацию подключений к БД"""
@@ -536,7 +529,7 @@ class DatabaseManager:
 db_manager = DatabaseManager()
 
 # Создаем MCP сервер
-server = Server("skyeng-db-server")
+server = Server("mcp-db")
 
 @server.list_tools()
 async def list_tools() -> list[Tool]:
@@ -681,17 +674,18 @@ def show_help():
     """Показать справку"""
     print("MCP сервер для работы с БД Skyeng Platform\n")
     print("Использование:")
-    print("  mcp-skyeng-db                 - Запуск MCP сервера")
-    print("  mcp-skyeng-db --help           - Показать эту справку")
-    print("  mcp-skyeng-db --list-databases - Показать все БД и статус подключения")
-    print("  mcp-skyeng-db --test           - Проверить подключения ко всем БД\n")
+    print("  ./mcp-server                  - Запуск MCP сервера")
+    print("  ./mcp-server --help           - Показать эту справку")
+    print("  ./mcp-server --list-databases - Показать все БД и статус подключения")
+    print("  ./mcp-server --test           - Проверить подключения ко всем БД\n")
     print("Доступные инструменты MCP:")
     print("  • execute_query         - Выполнить SQL запрос к БД; для *_auto_y10/*_auto_s2 и подобных тестовых БД разрешены любые запросы")
     print("  • get_tables_schemas    - Получить схемы указанных таблиц или всех таблиц в БД")
     print("  • list_databases        - Список всех доступных БД и их статус")
     print("  • get_database_info     - Детальная информация о БД (размер, таблицы)\n")
     print("Конфигурация:")
-    print("  ~/.config/mcp-skyeng-db/.db.yaml - Настройки подключений к БД")
+    print("  .db.yaml рядом с mcp-db-server.py — настройки подключений к БД (по умолчанию)")
+    print("  MCP_DB_CONFIG=/absolute/path/to/.db.yaml — переопределить путь к конфигу")
 
 async def main():
     """Запуск MCP сервера"""

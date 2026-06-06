@@ -14,8 +14,8 @@
 
 ```bash
 # Клонируем проект
-git clone <repository> mcp-smartroom-db
-cd mcp-smartroom-db
+git clone https://github.com/CynepHy6/mcp-db.git mcp-db
+cd mcp-db
 
 # Создаем виртуальное окружение и устанавливаем зависимости
 python3 -m venv venv
@@ -108,13 +108,30 @@ python3 mcp-db-server.py
 
 ### 4. Интеграция с Cursor
 
-Добавьте в настройки Cursor:
+По умолчанию сервер читает `.db.yaml` из каталога `mcp-db`. Чтобы указать другой файл, задайте `MCP_DB_CONFIG` — абсолютный путь к YAML с кредами.
+
+Добавьте в `~/.cursor/mcp.json`:
 
 ```json
 {
   "mcpServers": {
-    "skyeng-db-server": {
-      "command": "/absolute/path/to/mcp-smartroom-db/mcp-server"
+    "DB": {
+      "command": "/absolute/path/to/mcp-db/mcp-server",
+      "env": {
+        "MCP_DB_CONFIG": "/absolute/path/to/.db.yaml",
+      }
+    }
+  }
+}
+```
+
+Если `MCP_DB_CONFIG` не задан, используется `/absolute/path/to/mcp-db/.db.yaml` рядом с сервером — тогда блок `env` можно убрать целиком:
+
+```json
+{
+  "mcpServers": {
+    "DB": {
+      "command": "/absolute/path/to/mcp-db/mcp-server"
     }
   }
 }
@@ -131,11 +148,9 @@ python3 mcp-db-server.py
 ## 📁 Структура проекта
 
 ```
-mcp-smartroom-db/
+mcp-db/
 ├── mcp-db-server.py          # Основной сервер
 ├── mcp-server               # Исполняемый скрипт-обертка
-├── .cursor/
-│   └── mcp-config.json      # Конфигурация для Cursor
 ├── venv/                    # Виртуальное окружение
 ├── requirements-mcp.txt      # Зависимости Python
 ├── .db.yaml                 # Креды БД (создается вручную)
