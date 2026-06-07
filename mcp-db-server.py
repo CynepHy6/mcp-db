@@ -664,17 +664,17 @@ async def list_tools() -> list[Tool]:
     return [
         Tool(
             name="execute_query",
-            description="Выполнить SQL запрос к БД. Для обычных БД разрешено только чтение, для тестовых *_auto_<env> разрешены любые запросы",
+            description="Выполнить SQL запрос к БД. Для обычных БД разрешено только чтение; для ключей конфига *_auto_<env> — любые запросы",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "SQL запрос. Для обычных БД только SELECT, WITH, EXPLAIN; для БД вида *_auto_y10/*_auto_s2 любые запросы"
+                        "description": "SQL запрос. Для обычных БД только SELECT, WITH, EXPLAIN; для ключей конфига *_auto_y10/*_auto_s2 — любые запросы"
                     },
                     "database": {
                         "type": "string",
-                        "description": "Название БД (например: math, skysmart_english)"
+                        "description": "Ключ записи в .db.yaml (не имя БД на сервере из поля database)"
                     }
                 },
                 "required": ["query", "database"]
@@ -688,7 +688,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "database": {
                         "type": "string",
-                        "description": "Название БД"
+                        "description": "Ключ записи в .db.yaml"
                     },
                     "table_names": {
                         "type": "array",
@@ -715,7 +715,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "database": {
                         "type": "string",
-                        "description": "Название БД"
+                        "description": "Ключ записи в .db.yaml"
                     }
                 },
                 "required": ["database"]
