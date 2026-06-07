@@ -1,6 +1,7 @@
 # MCP Server Dependencies
 mcp>=1.0.0
 psycopg2-binary>=2.9.7
+PyMySQL>=1.1.0
 PyYAML>=6.0.1
 
 # Optional dependencies for enhanced functionality

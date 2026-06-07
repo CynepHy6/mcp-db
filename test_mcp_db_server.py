@@ -97,6 +97,7 @@ def test_load_db_config_supports_legacy_format(tmp_path):
         "user": "legacy_user",
         "password": "secret",
         "block_store": "legacy_block_store",
+        "db_type": "postgres",
     }
 
 
@@ -129,6 +130,7 @@ def test_load_db_config_supports_templates_and_overrides(tmp_path):
         "user": "ya_testing",
         "password": "secret",
         "block_store": "common_block_store",
+        "db_type": "postgres",
     }
     assert manager.connections["teacher_catalog_auto_y10"] == {
         "host": "test-y10-local.skyeng.link",
@@ -137,6 +139,7 @@ def test_load_db_config_supports_templates_and_overrides(tmp_path):
         "user": "ya_testing",
         "password": "secret",
         "block_store": "custom_block_store",
+        "db_type": "postgres",
     }
 
 
@@ -154,3 +157,97 @@ def test_load_db_config_raises_for_unknown_template(tmp_path):
 
     with pytest.raises(ValueError, match="Шаблон missing_template для БД broken_db не найден"):
         DatabaseManager(config_path=str(config_path))
+
+
+@pytest.mark.parametrize(
+    ("host", "port", "expected"),
+    [
+        ("mysql-skyeng-timetable-repl.skyeng.link", 3306, "mysql"),
+        ("pgsql-student-vacation-repl.skyeng.link", 5432, "postgres"),
+        ("legacy-host.skyeng.link", 5432, "postgres"),
+        ("test-y10-local.skyeng.link", 3306, "mysql"),
+        ("test-y10-local.skyeng.link", 5432, "postgres"),
+        ("test-y10-local.skyeng.link", 5532, "postgres"),
+    ],
+)
+def test_infer_db_type(host, port, expected):
+    assert DatabaseManager._infer_db_type(host, port) == expected
+
+
+def test_load_db_config_detects_db_type_from_host_prefix(tmp_path):
+    manager = create_db_manager_with_config(
+        tmp_path,
+        """
+        timetable:
+          mysql-skyeng-timetable-repl.skyeng.link: 3306
+          ro_user: secret
+
+        student_vacation:
+          pgsql-student-vacation-repl.skyeng.link: 5432
+          ro_user: secret
+        """
+    )
+
+    assert manager.connections["timetable"]["db_type"] == "mysql"
+    assert manager.connections["student_vacation"]["db_type"] == "postgres"
+
+
+def test_load_db_config_detects_db_type_from_port_on_testing(tmp_path):
+    manager = create_db_manager_with_config(
+        tmp_path,
+        """
+        _templates:
+          test_mysql8:
+            host: test-y10-local.skyeng.link
+            port: 3306
+            user: ya_testing
+            password: secret
+          test_pg11:
+            host: test-y10-local.skyeng.link
+            port: 5432
+            user: ya_testing
+            password: secret
+          test_pg15:
+            host: test-y10-local.skyeng.link
+            port: 5532
+            user: ya_testing
+            password: secret
+
+        timetable_auto_y10:
+          template: test_mysql8
+        crm_auto_y10:
+          template: test_pg15
+        trm_auto_y10:
+          template: test_pg11
+        """
+    )
+
+    assert manager.connections["timetable_auto_y10"]["db_type"] == "mysql"
+    assert manager.connections["crm_auto_y10"]["db_type"] == "postgres"
+    assert manager.connections["trm_auto_y10"]["db_type"] == "postgres"
+
+
+def test_load_db_config_supports_database_name_override(tmp_path):
+    manager = create_db_manager_with_config(
+        tmp_path,
+        """
+        _templates:
+          test_mysql8:
+            host: test-y10-local.skyeng.link
+            port: 3306
+            user: ya_testing
+            password: secret
+
+        timetable_auto_y10:
+          template: test_mysql8
+          database: timetable
+
+        timetable:
+          mysql-skyeng-timetable-repl.skyeng.link: 3306
+          ro_user: secret
+          database: timetable
+        """
+    )
+
+    assert manager.connections["timetable_auto_y10"]["database"] == "timetable"
+    assert manager.connections["timetable"]["database"] == "timetable"

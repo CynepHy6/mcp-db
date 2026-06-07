@@ -17,6 +17,8 @@ import yaml
 
 import psycopg2
 import psycopg2.extras
+import pymysql
+import pymysql.cursors
 from mcp.server import Server
 from mcp.types import (
     Resource, Tool, TextContent, CallToolRequest,
@@ -39,6 +41,22 @@ class DatabaseManager:
     """Менеджер для работы с базами данных предметов"""
 
     WRITE_ALLOWED_DATABASE_PATTERN = re.compile(r"_auto_\w\d+$")
+
+    @staticmethod
+    def _infer_db_type(host: str, port: int) -> str:
+        """Определяет тип БД: префикс хоста для реплик, порт для тестингов."""
+        host_lower = host.lower()
+        if host_lower.startswith("mysql-"):
+            return "mysql"
+        if host_lower.startswith("pgsql-"):
+            return "postgres"
+
+        port_to_db_type = {
+            3306: "mysql",    # mysql8 на тестинге
+            5432: "postgres",  # pg11
+            5532: "postgres",  # pg15
+        }
+        return port_to_db_type.get(int(port), "postgres")
 
     def __init__(self, config_path: str = None):
         # Получаем директорию скрипта
@@ -78,7 +96,10 @@ class DatabaseManager:
 
                 if normalized_config:
                     self.connections[db_name] = normalized_config
-                    logger.info(f"Загружена конфигурация для БД: {db_name}")
+                    logger.info(
+                        f"Загружена конфигурация для БД: {db_name} "
+                        f"({normalized_config['db_type']})"
+                    )
                 else:
                     logger.warning(f"Неполная конфигурация для БД {db_name}")
 
@@ -95,7 +116,7 @@ class DatabaseManager:
         port = None
         user = None
         password = None
-        reserved_keys = ["block_store", "template", "host", "port", "user", "password"]
+        reserved_keys = ["block_store", "template", "host", "port", "user", "password", "type", "database"]
 
         for key, value in db_info.items():
             if isinstance(value, int) and key not in reserved_keys:
@@ -110,7 +131,9 @@ class DatabaseManager:
             "port": port,
             "user": user,
             "password": password,
-            "block_store": db_info.get("block_store")
+            "block_store": db_info.get("block_store"),
+            "type": db_info.get("type"),
+            "database": db_info.get("database"),
         }
 
     def _normalize_db_config_entry(
@@ -151,6 +174,8 @@ class DatabaseManager:
             "user": pick_config_value("user"),
             "password": pick_config_value("password"),
             "block_store": pick_config_value("block_store"),
+            "type": pick_config_value("type"),
+            "database": pick_config_value("database"),
         }
 
         if not all([
@@ -161,13 +186,19 @@ class DatabaseManager:
         ]):
             return None
 
+        host = resolved_config["host"]
+        port = int(resolved_config["port"])
+        db_type = resolved_config.get("type") or self._infer_db_type(host, port)
+        database = resolved_config.get("database") or db_name
+
         return {
-            "host": resolved_config["host"],
+            "host": host,
             "port": resolved_config["port"],
-            "database": db_name,
+            "database": database,
             "user": resolved_config["user"],
             "password": resolved_config["password"],
-            "block_store": resolved_config.get("block_store")
+            "block_store": resolved_config.get("block_store"),
+            "db_type": db_type,
         }
 
 
@@ -209,20 +240,77 @@ class DatabaseManager:
             raise ValueError(f"БД {db_name} не найдена в конфигурации")
 
         conn_config = self.connections[db_name]
+        db_type = conn_config.get("db_type", "postgres")
 
         try:
-            conn = psycopg2.connect(
-                host=conn_config["host"],
-                port=conn_config["port"],
-                database=conn_config["database"],
-                user=conn_config["user"],
-                password=conn_config["password"],
-                connect_timeout=self.connect_timeout
-            )
+            if db_type == "mysql":
+                conn = pymysql.connect(
+                    host=conn_config["host"],
+                    port=int(conn_config["port"]),
+                    user=conn_config["user"],
+                    password=conn_config["password"],
+                    database=conn_config["database"],
+                    connect_timeout=self.connect_timeout,
+                    cursorclass=pymysql.cursors.DictCursor,
+                )
+            else:
+                conn = psycopg2.connect(
+                    host=conn_config["host"],
+                    port=conn_config["port"],
+                    database=conn_config["database"],
+                    user=conn_config["user"],
+                    password=conn_config["password"],
+                    connect_timeout=self.connect_timeout
+                )
             return conn
         except Exception as e:
             logger.error(f"Ошибка подключения к БД {db_name}: {e}")
             raise
+
+    def _cursor(self, conn, db_type: str):
+        """Возвращает cursor context manager с dict-like строками."""
+        if db_type == "mysql":
+            return conn.cursor()
+        return conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+    def _connection_summary_queries(self, db_type: str) -> Tuple[str, str, str]:
+        """SQL для list_databases / get_database_info: info, size, tables_count."""
+        if db_type == "mysql":
+            return (
+                """
+                SELECT
+                    DATABASE() as database_name,
+                    CURRENT_USER() as current_user,
+                    VERSION() as version
+                """,
+                """
+                SELECT COALESCE(SUM(data_length + index_length), 0) as size_bytes
+                FROM information_schema.tables
+                WHERE table_schema = DATABASE()
+                """,
+                """
+                SELECT COUNT(*) as tables_count
+                FROM information_schema.tables
+                WHERE table_schema = DATABASE()
+                  AND table_type = 'BASE TABLE'
+                """,
+            )
+
+        return (
+            """
+            SELECT
+                current_database() as database_name,
+                current_user as current_user,
+                version() as version,
+                pg_database_size(current_database()) as size_bytes
+            """,
+            "",
+            """
+            SELECT COUNT(*) as tables_count
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+            """,
+        )
 
 
 
@@ -241,23 +329,19 @@ class DatabaseManager:
     def _fetch_one_database_for_list(self, db_name: str) -> Tuple[str, Dict]:
         """Собирает информацию по одной БД для list_databases (для вызова из пула потоков)."""
         config = self.connections[db_name]
+        db_type = config.get("db_type", "postgres")
         try:
             with self._get_connection(db_name) as conn:
-                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                    cur.execute("""
-                    SELECT
-                        current_database() as database_name,
-                        current_user as current_user,
-                        version() as version,
-                        pg_database_size(current_database()) as size_bytes
-                    """)
+                with self._cursor(conn, db_type) as cur:
+                    info_query, size_query, tables_query = self._connection_summary_queries(db_type)
+                    cur.execute(info_query)
                     db_info = dict(cur.fetchone())
 
-                    cur.execute("""
-                    SELECT COUNT(*) as tables_count
-                    FROM information_schema.tables
-                    WHERE table_schema = 'public'
-                    """)
+                    if size_query:
+                        cur.execute(size_query)
+                        db_info.update(dict(cur.fetchone()))
+
+                    cur.execute(tables_query)
                     tables_info = dict(cur.fetchone())
 
                     entry = {
@@ -266,7 +350,8 @@ class DatabaseManager:
                         "connection_config": {
                             "host": config["host"],
                             "database": config["database"],
-                            "user": config["user"]
+                            "user": config["user"],
+                            "db_type": db_type,
                         },
                         "available": True,
                         **self._get_block_store_info(db_name)
@@ -280,7 +365,8 @@ class DatabaseManager:
                 "connection_config": {
                     "host": config["host"],
                     "database": config["database"],
-                    "user": config["user"]
+                    "user": config["user"],
+                    "db_type": db_type,
                 },
                 **self._get_block_store_info(db_name)
             }
@@ -325,10 +411,11 @@ class DatabaseManager:
             }
 
         start_time = time.time()
+        db_type = self.connections[database].get("db_type", "postgres")
 
         try:
             with self._get_connection(database) as conn:
-                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                with self._cursor(conn, db_type) as cur:
                     cur.execute(query)
 
                     if cur.description:
@@ -336,6 +423,9 @@ class DatabaseManager:
                         results = [dict(row) for row in results]
                     else:
                         results = []
+
+                    if db_type == "mysql" and self._is_write_allowed_database(database):
+                        conn.commit()
 
                     execution_time = time.time() - start_time
 
@@ -369,29 +459,41 @@ class DatabaseManager:
             }
 
         config = self.connections[database]
+        db_type = config.get("db_type", "postgres")
 
         try:
             with self._get_connection(database) as conn:
-                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                    # Основная информация
-                    cur.execute("""
-                    SELECT
-                        current_database() as database_name,
-                        current_user as current_user,
-                        version() as version,
-                        pg_database_size(current_database()) as size_bytes
-                    """)
+                with self._cursor(conn, db_type) as cur:
+                    info_query, size_query, tables_query = self._connection_summary_queries(db_type)
+                    cur.execute(info_query)
                     db_info = dict(cur.fetchone())
 
-                    # Список таблиц
-                    cur.execute("""
-                    SELECT
-                        tablename,
-                        pg_size_pretty(pg_total_relation_size('public.'||tablename)) as size
-                    FROM pg_tables
-                    WHERE schemaname = 'public'
-                    ORDER BY pg_total_relation_size('public.'||tablename) DESC
-                    """)
+                    if size_query:
+                        cur.execute(size_query)
+                        db_info.update(dict(cur.fetchone()))
+
+                    if db_type == "mysql":
+                        cur.execute("""
+                        SELECT
+                            table_name as tablename,
+                            CONCAT(
+                                ROUND((data_length + index_length) / 1024 / 1024, 2),
+                                ' MB'
+                            ) as size
+                        FROM information_schema.tables
+                        WHERE table_schema = DATABASE()
+                          AND table_type = 'BASE TABLE'
+                        ORDER BY (data_length + index_length) DESC
+                        """)
+                    else:
+                        cur.execute("""
+                        SELECT
+                            tablename,
+                            pg_size_pretty(pg_total_relation_size('public.'||tablename)) as size
+                        FROM pg_tables
+                        WHERE schemaname = 'public'
+                        ORDER BY pg_total_relation_size('public.'||tablename) DESC
+                        """)
                     tables = [dict(row) for row in cur.fetchall()]
 
                     return {
@@ -403,7 +505,8 @@ class DatabaseManager:
                         "connection_config": {
                             "host": config["host"],
                             "database": config["database"],
-                            "user": config["user"]
+                            "user": config["user"],
+                            "db_type": db_type,
                         },
                         **self._get_block_store_info(database)
                     }
@@ -417,7 +520,8 @@ class DatabaseManager:
                 "connection_config": {
                     "host": config["host"],
                     "database": config["database"],
-                    "user": config["user"]
+                    "user": config["user"],
+                    "db_type": db_type,
                 },
                 **self._get_block_store_info(database)
             }
@@ -430,10 +534,11 @@ class DatabaseManager:
                 "database": database
             }
 
+        db_type = self.connections[database].get("db_type", "postgres")
+
         try:
             with self._get_connection(database) as conn:
-                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                    # Формируем условие для фильтрации таблиц
+                with self._cursor(conn, db_type) as cur:
                     table_filter = ""
                     params = []
                     if table_names:
@@ -441,7 +546,11 @@ class DatabaseManager:
                         table_filter = f" AND table_name IN ({placeholders})"
                         params.extend(table_names)
 
-                    # Получаем колонки для указанных таблиц
+                    if db_type == "mysql":
+                        schema_filter = "table_schema = DATABASE()"
+                    else:
+                        schema_filter = "table_schema = 'public'"
+
                     columns_query = f"""
                     SELECT
                         table_name,
@@ -453,30 +562,49 @@ class DatabaseManager:
                         numeric_precision,
                         numeric_scale
                     FROM information_schema.columns
-                    WHERE table_schema = 'public'{table_filter}
+                    WHERE {schema_filter}{table_filter}
                     ORDER BY table_name, ordinal_position;
                     """
                     cur.execute(columns_query, params)
                     columns_data = cur.fetchall()
 
-                    # Получаем индексы для указанных таблиц
                     indexes_filter = ""
                     if table_names:
                         placeholders = ','.join(['%s'] * len(table_names))
-                        indexes_filter = f" AND tablename IN ({placeholders})"
+                        if db_type == "mysql":
+                            indexes_filter = f" AND table_name IN ({placeholders})"
+                        else:
+                            indexes_filter = f" AND tablename IN ({placeholders})"
 
-                    indexes_query = f"""
-                    SELECT
-                        tablename,
-                        indexname,
-                        indexdef
-                    FROM pg_indexes
-                    WHERE schemaname = 'public'{indexes_filter};
-                    """
+                    if db_type == "mysql":
+                        indexes_query = f"""
+                        SELECT
+                            table_name as tablename,
+                            index_name as indexname,
+                            CONCAT(
+                                'INDEX ',
+                                index_name,
+                                ' (',
+                                GROUP_CONCAT(column_name ORDER BY seq_in_index SEPARATOR ', '),
+                                ')'
+                            ) as indexdef
+                        FROM information_schema.statistics
+                        WHERE table_schema = DATABASE(){indexes_filter}
+                        GROUP BY table_name, index_name
+                        ORDER BY table_name, index_name;
+                        """
+                    else:
+                        indexes_query = f"""
+                        SELECT
+                            tablename,
+                            indexname,
+                            indexdef
+                        FROM pg_indexes
+                        WHERE schemaname = 'public'{indexes_filter};
+                        """
                     cur.execute(indexes_query, params if table_names else [])
                     indexes_data = cur.fetchall()
 
-                    # Группируем данные по таблицам
                     tables = {}
                     for row in columns_data:
                         table_name = row["table_name"]
@@ -495,7 +623,6 @@ class DatabaseManager:
                             "numeric_scale": row.get("numeric_scale")
                         })
 
-                    # Добавляем индексы
                     for row in indexes_data:
                         table_name = row["tablename"]
                         if table_name not in tables:
