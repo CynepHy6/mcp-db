@@ -3,6 +3,12 @@ import importlib.util
 import sys
 import textwrap
 
+# Фиктивные хосты для тестов конфигурации (не prod/test инфраструктура).
+MYSQL_REPL_HOST = "mysql-example-repl.example.test"
+PGSQL_REPL_HOST = "pgsql-example-repl.example.test"
+TEST_ENV_HOST = "test-env-local.example.test"
+LEGACY_HOST = "legacy-host.example.test"
+
 # Импортируем DatabaseManager из файла с дефисом в имени
 spec = importlib.util.spec_from_file_location("mcp_db_server", "./mcp-db-server.py")
 mcp_db_server = importlib.util.module_from_spec(spec)
@@ -82,16 +88,16 @@ def test_is_write_allowed_database(db_manager, database_name, expected):
 def test_load_db_config_supports_legacy_format(tmp_path):
     manager = create_db_manager_with_config(
         tmp_path,
-        """
+        f"""
         legacy_db:
-          legacy-host.skyeng.link: 5432
+          {LEGACY_HOST}: 5432
           legacy_user: secret
           block_store: legacy_block_store
         """
     )
 
     assert manager.connections["legacy_db"] == {
-        "host": "legacy-host.skyeng.link",
+        "host": LEGACY_HOST,
         "port": 5432,
         "database": "legacy_db",
         "user": "legacy_user",
@@ -104,10 +110,10 @@ def test_load_db_config_supports_legacy_format(tmp_path):
 def test_load_db_config_supports_templates_and_overrides(tmp_path):
     manager = create_db_manager_with_config(
         tmp_path,
-        """
+        f"""
         _templates:
           test_y10_pg11:
-            host: test-y10-local.skyeng.link
+            host: {TEST_ENV_HOST}
             port: 5432
             user: ya_testing
             password: secret
@@ -124,7 +130,7 @@ def test_load_db_config_supports_templates_and_overrides(tmp_path):
     )
 
     assert manager.connections["skysmart_english_auto_y10"] == {
-        "host": "test-y10-local.skyeng.link",
+        "host": TEST_ENV_HOST,
         "port": 5432,
         "database": "skysmart_english_auto_y10",
         "user": "ya_testing",
@@ -133,7 +139,7 @@ def test_load_db_config_supports_templates_and_overrides(tmp_path):
         "db_type": "postgres",
     }
     assert manager.connections["teacher_catalog_auto_y10"] == {
-        "host": "test-y10-local.skyeng.link",
+        "host": TEST_ENV_HOST,
         "port": 5532,
         "database": "teacher_catalog_auto_y10",
         "user": "ya_testing",
@@ -162,12 +168,12 @@ def test_load_db_config_raises_for_unknown_template(tmp_path):
 @pytest.mark.parametrize(
     ("host", "port", "expected"),
     [
-        ("mysql-skyeng-timetable-repl.skyeng.link", 3306, "mysql"),
-        ("pgsql-student-vacation-repl.skyeng.link", 5432, "postgres"),
-        ("legacy-host.skyeng.link", 5432, "postgres"),
-        ("test-y10-local.skyeng.link", 3306, "mysql"),
-        ("test-y10-local.skyeng.link", 5432, "postgres"),
-        ("test-y10-local.skyeng.link", 5532, "postgres"),
+        (MYSQL_REPL_HOST, 3306, "mysql"),
+        (PGSQL_REPL_HOST, 5432, "postgres"),
+        (LEGACY_HOST, 5432, "postgres"),
+        (TEST_ENV_HOST, 3306, "mysql"),
+        (TEST_ENV_HOST, 5432, "postgres"),
+        (TEST_ENV_HOST, 5532, "postgres"),
     ],
 )
 def test_infer_db_type(host, port, expected):
@@ -177,13 +183,13 @@ def test_infer_db_type(host, port, expected):
 def test_load_db_config_detects_db_type_from_host_prefix(tmp_path):
     manager = create_db_manager_with_config(
         tmp_path,
-        """
+        f"""
         timetable:
-          mysql-skyeng-timetable-repl.skyeng.link: 3306
+          {MYSQL_REPL_HOST}: 3306
           ro_user: secret
 
         student_vacation:
-          pgsql-student-vacation-repl.skyeng.link: 5432
+          {PGSQL_REPL_HOST}: 5432
           ro_user: secret
         """
     )
@@ -195,20 +201,20 @@ def test_load_db_config_detects_db_type_from_host_prefix(tmp_path):
 def test_load_db_config_detects_db_type_from_port_on_testing(tmp_path):
     manager = create_db_manager_with_config(
         tmp_path,
-        """
+        f"""
         _templates:
           test_mysql8:
-            host: test-y10-local.skyeng.link
+            host: {TEST_ENV_HOST}
             port: 3306
             user: ya_testing
             password: secret
           test_pg11:
-            host: test-y10-local.skyeng.link
+            host: {TEST_ENV_HOST}
             port: 5432
             user: ya_testing
             password: secret
           test_pg15:
-            host: test-y10-local.skyeng.link
+            host: {TEST_ENV_HOST}
             port: 5532
             user: ya_testing
             password: secret
@@ -230,10 +236,10 @@ def test_load_db_config_detects_db_type_from_port_on_testing(tmp_path):
 def test_load_db_config_supports_database_name_override(tmp_path):
     manager = create_db_manager_with_config(
         tmp_path,
-        """
+        f"""
         _templates:
           test_mysql8:
-            host: test-y10-local.skyeng.link
+            host: {TEST_ENV_HOST}
             port: 3306
             user: ya_testing
             password: secret
@@ -243,7 +249,7 @@ def test_load_db_config_supports_database_name_override(tmp_path):
           database: timetable
 
         timetable:
-          mysql-skyeng-timetable-repl.skyeng.link: 3306
+          {MYSQL_REPL_HOST}: 3306
           ro_user: secret
           database: timetable
         """
@@ -251,3 +257,20 @@ def test_load_db_config_supports_database_name_override(tmp_path):
 
     assert manager.connections["timetable_auto_y10"]["database"] == "timetable"
     assert manager.connections["timetable"]["database"] == "timetable"
+
+
+def test_connection_summary_queries_mysql_quotes_reserved_aliases(db_manager):
+    info_query, size_query, tables_query = db_manager._connection_summary_queries("mysql")
+
+    assert "CURRENT_USER() AS `current_user`" in info_query
+    assert "VERSION() AS `version`" in info_query
+    assert "information_schema.tables" in size_query
+    assert "information_schema.tables" in tables_query
+
+
+def test_connection_summary_queries_postgres_unchanged(db_manager):
+    info_query, size_query, tables_query = db_manager._connection_summary_queries("postgres")
+
+    assert "current_user as current_user" in info_query
+    assert size_query == ""
+    assert "information_schema.tables" in tables_query

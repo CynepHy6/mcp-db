@@ -279,9 +279,9 @@ class DatabaseManager:
             return (
                 """
                 SELECT
-                    DATABASE() as database_name,
-                    CURRENT_USER() as current_user,
-                    VERSION() as version
+                    DATABASE() AS database_name,
+                    CURRENT_USER() AS `current_user`,
+                    VERSION() AS `version`
                 """,
                 """
                 SELECT COALESCE(SUM(data_length + index_length), 0) as size_bytes
