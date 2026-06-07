@@ -1,5 +1,6 @@
 # Креды БД - НЕ коммитим!
 .db.yaml
+.db-testing.yaml
 
 # Виртуальное окружение Python
 venv/

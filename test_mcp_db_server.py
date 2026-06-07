@@ -1,99 +1,92 @@
 import pytest
 import importlib.util
 import sys
-import textwrap
 
 # Фиктивные хосты для тестов конфигурации (не prod/test инфраструктура).
 MYSQL_REPL_HOST = "mysql-example-repl.example.test"
 PGSQL_REPL_HOST = "pgsql-example-repl.example.test"
 TEST_ENV_HOST = "test-env-local.example.test"
 LEGACY_HOST = "legacy-host.example.test"
+TESTING_ALPHA = "test-alpha"
+TESTING_BETA = "test-beta"
 
-# Импортируем DatabaseManager из файла с дефисом в имени
 spec = importlib.util.spec_from_file_location("mcp_db_server", "./mcp-db-server.py")
 mcp_db_server = importlib.util.module_from_spec(spec)
 sys.modules["mcp_db_server"] = mcp_db_server
 spec.loader.exec_module(mcp_db_server)
 DatabaseManager = mcp_db_server.DatabaseManager
 
+TESTING_CONFIG = """
+user: test_user
+password: secret
+host_template: "{{env}}-local.example.test"
+engines:
+  mysql8: { port: 13306, type: mysql }
+  pg11:   { port: 15432, type: postgres }
+  pg15:   { port: 25432, type: postgres }
+  pg9:    { port: 35432, type: postgres }
+services:
+  crm: pg15
+  trm: pg11
+  timetable:
+    engine: mysql8
+    database: timetable
+  skysmart_english:
+    engine: pg11
+    block_store: vimbox_store_english_skysmart
+""".strip()
+
+PROD_CONFIG = f"prod_db:\n  {LEGACY_HOST}: 5432\n  legacy_user: secret"
+
+
 @pytest.fixture
-def db_manager():
-    # Можно передать фиктивный путь, т.к. для теста нужен только _validate_query
-    return DatabaseManager(config_path=None)
+def db_manager(tmp_path):
+    return create_db_manager_with_config(tmp_path, PROD_CONFIG, TESTING_CONFIG)
 
 
-def create_db_manager_with_config(tmp_path, config_text):
+def create_db_manager_with_config(tmp_path, prod_text=None, testing_text=None):
     config_path = tmp_path / "db.yaml"
-    config_path.write_text(textwrap.dedent(config_text), encoding="utf-8")
-    return DatabaseManager(config_path=str(config_path))
+    testing_config_path = tmp_path / "db-testing.yaml"
+
+    config_path.write_text((prod_text or "placeholder: {}\n  x: 1").strip() + "\n", encoding="utf-8")
+    if testing_text is not None:
+        testing_config_path.write_text(testing_text.strip() + "\n", encoding="utf-8")
+    else:
+        testing_config_path.unlink(missing_ok=True)
+
+    return DatabaseManager(
+        config_path=str(config_path),
+        testing_config_path=str(testing_config_path),
+    )
+
 
 def test_validate_query_allows_complex_select(db_manager):
-    query = '''
-    SELECT 
-        r.hash,
-        r.name,
-        r.type,
-        r.status,
-        r.created_at,
-        r.started_at,
-        r.closed_at,
-        lm.id as lesson_material_id,
-        lm.name as lesson_material_name
-    FROM room r
-    JOIN room_participant rp ON rp.room_id = r.id
-    JOIN lesson_material lm ON lm.id = rp.current_material_id
-    WHERE r.hash IN ('bufadurelapu', 'zalevemaruzi', 'febefabagafo', 'vuvelevevela')
-    ORDER BY r.started_at, lm.id;
-    '''
-    assert db_manager._validate_query(query) is True
-
-    query = "SELECT \n    r.hash,\n    r.name,\n    r.type,\n    r.status,\n    r.created_at,\n    r.started_at,\n    r.closed_at,\n    lm.id as lesson_material_id,\n    lm.name as lesson_material_name\nFROM room r\nJOIN room_participant rp ON rp.room_id = r.id\nJOIN lesson_material lm ON lm.id = rp.current_material_id\nWHERE r.hash IN ('bufadurelapu', 'zalevemaruzi', 'febefabagafo', 'vuvelevevela')\nORDER BY r.started_at, lm.id;"
-
-    assert db_manager._validate_query(query) is True 
+    assert db_manager._validate_query("SELECT id FROM users WHERE id = 1") is True
 
 
-def test_validate_query_blocks_write_for_regular_database(db_manager):
+def test_validate_query_blocks_write_for_prod(db_manager):
     query = "UPDATE users SET name = 'test' WHERE id = 1"
-
-    assert db_manager._validate_query(query, "skysmart_english") is False
-
-
-@pytest.mark.parametrize(
-    ("database_name", "query"),
-    [
-        ("teacher_catalog_auto_y10", "UPDATE teachers SET name = 'test' WHERE id = 1"),
-        ("skysmart_english_auto_y44", "DELETE FROM users WHERE id = 1"),
-        ("skysmart_english_auto_s2", "INSERT INTO users(id) VALUES (1)"),
-    ],
-)
-def test_validate_query_allows_any_query_for_auto_databases(db_manager, database_name, query):
-    assert db_manager._validate_query(query, database_name) is True
+    assert db_manager._validate_query(query) is False
+    assert db_manager._validate_query(query, testing=None) is False
 
 
 @pytest.mark.parametrize(
-    ("database_name", "expected"),
+    ("query",),
     [
-        ("teacher_catalog_auto_y10", True),
-        ("skysmart_english_auto_y44", True),
-        ("skysmart_english_auto_s2", True),
-        ("skysmart_english", False),
-        ("teacher_catalog_auto", False),
-        ("teacher_catalog_auto_prod", False),
+        ("UPDATE teachers SET name = 'test' WHERE id = 1",),
+        ("DELETE FROM users WHERE id = 1",),
+        ("INSERT INTO users(id) VALUES (1)",),
     ],
 )
-def test_is_write_allowed_database(db_manager, database_name, expected):
-    assert db_manager._is_write_allowed_database(database_name) is expected
+def test_validate_query_allows_any_query_on_testing(db_manager, query):
+    assert db_manager._validate_query(query, testing=TESTING_ALPHA) is True
 
 
-def test_load_db_config_supports_legacy_format(tmp_path):
+def test_load_db_config_supports_legacy_prod_format(tmp_path):
     manager = create_db_manager_with_config(
         tmp_path,
-        f"""
-        legacy_db:
-          {LEGACY_HOST}: 5432
-          legacy_user: secret
-          block_store: legacy_block_store
-        """
+        f"legacy_db:\n  {LEGACY_HOST}: 5432\n  legacy_user: secret\n  block_store: legacy_block_store",
+        TESTING_CONFIG,
     )
 
     assert manager.connections["legacy_db"] == {
@@ -107,62 +100,145 @@ def test_load_db_config_supports_legacy_format(tmp_path):
     }
 
 
-def test_load_db_config_supports_templates_and_overrides(tmp_path):
+def test_load_prod_config_rejects_testing_section(tmp_path):
+    with pytest.raises(ValueError, match="отдельный файл .db-testing.yaml"):
+        create_db_manager_with_config(
+            tmp_path,
+            "_testing:\n  user: u\n  password: p\n  host_template: '{{env}}-x.test'\n  engines:\n    pg11: { port: 15432, type: postgres }\n  services:\n    crm: pg11",
+            None,
+        )
+
+
+def test_missing_testing_config_is_optional(tmp_path):
+    manager = create_db_manager_with_config(tmp_path, PROD_CONFIG, testing_text=None)
+    assert manager.testing_config is None
+    with pytest.raises(ValueError, match=".db-testing.yaml не настроен"):
+        manager._resolve_testing_connection(TESTING_ALPHA, "crm")
+
+
+def test_resolve_testing_connection_builds_host_and_database(db_manager):
+    conn = db_manager._resolve_testing_connection(TESTING_ALPHA, "crm")
+
+    assert conn == {
+        "host": "test-alpha-local.example.test",
+        "port": 25432,
+        "database": "crm_auto_alpha",
+        "user": "test_user",
+        "password": "secret",
+        "block_store": None,
+        "db_type": "postgres",
+        "engine": "pg15",
+        "testing": TESTING_ALPHA,
+        "service": "crm",
+    }
+
+
+def test_resolve_testing_connection_supports_staging_name(db_manager):
+    conn = db_manager._resolve_testing_connection(TESTING_BETA, "trm")
+    assert conn["host"] == "test-beta-local.example.test"
+    assert conn["database"] == "trm_auto_beta"
+
+
+def test_resolve_testing_connection_supports_database_override(db_manager):
+    conn = db_manager._resolve_testing_connection(TESTING_ALPHA, "timetable")
+    assert conn["database"] == "timetable"
+    assert conn["db_type"] == "mysql"
+
+
+def test_resolve_testing_connection_includes_block_store(db_manager):
+    conn = db_manager._resolve_testing_connection(TESTING_ALPHA, "skysmart_english")
+    assert conn["block_store"] == "vimbox_store_english_skysmart"
+
+
+def test_resolve_testing_connection_raises_for_unknown_service(db_manager):
+    with pytest.raises(ValueError, match="unknown_service"):
+        db_manager._resolve_testing_connection(TESTING_ALPHA, "unknown_service")
+
+
+def test_normalize_testing_config_requires_host_template_placeholder(tmp_path):
     manager = create_db_manager_with_config(
         tmp_path,
-        f"""
-        _templates:
-          test_y10_pg11:
-            host: {TEST_ENV_HOST}
-            port: 5432
-            user: ya_testing
-            password: secret
-            block_store: common_block_store
-
-        skysmart_english_auto_y10:
-          template: test_y10_pg11
-
-        teacher_catalog_auto_y10:
-          template: test_y10_pg11
-          port: 5532
-          block_store: custom_block_store
+        PROD_CONFIG,
         """
+user: u
+password: p
+host_template: "fixed-host.example.test"
+engines:
+  pg11: { port: 15432, type: postgres }
+services:
+  crm: pg11
+""",
     )
 
-    assert manager.connections["skysmart_english_auto_y10"] == {
-        "host": TEST_ENV_HOST,
-        "port": 5432,
-        "database": "skysmart_english_auto_y10",
-        "user": "ya_testing",
-        "password": "secret",
-        "block_store": "common_block_store",
-        "db_type": "postgres",
-    }
-    assert manager.connections["teacher_catalog_auto_y10"] == {
-        "host": TEST_ENV_HOST,
-        "port": 5532,
-        "database": "teacher_catalog_auto_y10",
-        "user": "ya_testing",
-        "password": "secret",
-        "block_store": "custom_block_store",
-        "db_type": "postgres",
-    }
+    assert manager.testing_config is None
+    assert "host_template должен содержать" in manager.testing_config_error
 
 
-def test_load_db_config_raises_for_unknown_template(tmp_path):
-    config_path = tmp_path / "db.yaml"
-    config_path.write_text(
-        textwrap.dedent(
-            """
-            broken_db:
-              template: missing_template
-            """
-        ),
-        encoding="utf-8",
+def test_missing_engine_port_stores_config_error_and_surfaces_in_query(tmp_path):
+    manager = create_db_manager_with_config(
+        tmp_path,
+        PROD_CONFIG,
+        """
+user: u
+password: p
+host_template: "{{env}}-local.example.test"
+engines:
+  pg11: { type: postgres }
+services:
+  crm: pg11
+""",
     )
 
-    with pytest.raises(ValueError, match="Шаблон missing_template для БД broken_db не найден"):
-        DatabaseManager(config_path=str(config_path))
+    assert manager.testing_config is None
+    assert "не указан port" in manager.testing_config_error
+    assert "pg11" in manager.testing_config_error
+
+    result = manager.execute_query_direct("SELECT 1", "crm", testing=TESTING_ALPHA)
+    assert result["success"] is False
+    assert "не указан port" in result["error"]
+
+
+def test_missing_engine_type_stores_config_error_and_surfaces_in_query(tmp_path):
+    manager = create_db_manager_with_config(
+        tmp_path,
+        PROD_CONFIG,
+        """
+user: u
+password: p
+host_template: "{{env}}-local.example.test"
+engines:
+  pg11: { port: 15432 }
+services:
+  crm: pg11
+""",
+    )
+
+    assert manager.testing_config is None
+    assert "не указан type" in manager.testing_config_error
+    assert "pg11" in manager.testing_config_error
+
+    result = manager.execute_query_direct("SELECT 1", "crm", testing=TESTING_ALPHA)
+    assert result["success"] is False
+    assert "не указан type" in result["error"]
+
+
+def test_normalize_testing_config_raises_for_unknown_engine(tmp_path):
+    manager = create_db_manager_with_config(
+        tmp_path,
+        PROD_CONFIG,
+        """
+user: u
+password: p
+host_template: "{{env}}-local.example.test"
+engines:
+  pg11: { port: 15432, type: postgres }
+services:
+  crm: pg99
+""",
+    )
+
+    assert manager.testing_config is None
+    assert "неизвестный engine" in manager.testing_config_error
 
 
 @pytest.mark.parametrize(
@@ -173,7 +249,7 @@ def test_load_db_config_raises_for_unknown_template(tmp_path):
         (LEGACY_HOST, 5432, "postgres"),
         (TEST_ENV_HOST, 3306, "mysql"),
         (TEST_ENV_HOST, 5432, "postgres"),
-        (TEST_ENV_HOST, 5532, "postgres"),
+        (TEST_ENV_HOST, 25432, "postgres"),
     ],
 )
 def test_infer_db_type(host, port, expected):
@@ -183,80 +259,13 @@ def test_infer_db_type(host, port, expected):
 def test_load_db_config_detects_db_type_from_host_prefix(tmp_path):
     manager = create_db_manager_with_config(
         tmp_path,
-        f"""
-        timetable:
-          {MYSQL_REPL_HOST}: 3306
-          ro_user: secret
-
-        student_vacation:
-          {PGSQL_REPL_HOST}: 5432
-          ro_user: secret
-        """
+        f"timetable:\n  {MYSQL_REPL_HOST}: 3306\n  ro_user: secret\n\n"
+        f"student_vacation:\n  {PGSQL_REPL_HOST}: 5432\n  ro_user: secret",
+        TESTING_CONFIG,
     )
 
     assert manager.connections["timetable"]["db_type"] == "mysql"
     assert manager.connections["student_vacation"]["db_type"] == "postgres"
-
-
-def test_load_db_config_detects_db_type_from_port_on_testing(tmp_path):
-    manager = create_db_manager_with_config(
-        tmp_path,
-        f"""
-        _templates:
-          test_mysql8:
-            host: {TEST_ENV_HOST}
-            port: 3306
-            user: ya_testing
-            password: secret
-          test_pg11:
-            host: {TEST_ENV_HOST}
-            port: 5432
-            user: ya_testing
-            password: secret
-          test_pg15:
-            host: {TEST_ENV_HOST}
-            port: 5532
-            user: ya_testing
-            password: secret
-
-        timetable_auto_y10:
-          template: test_mysql8
-        crm_auto_y10:
-          template: test_pg15
-        trm_auto_y10:
-          template: test_pg11
-        """
-    )
-
-    assert manager.connections["timetable_auto_y10"]["db_type"] == "mysql"
-    assert manager.connections["crm_auto_y10"]["db_type"] == "postgres"
-    assert manager.connections["trm_auto_y10"]["db_type"] == "postgres"
-
-
-def test_load_db_config_supports_database_name_override(tmp_path):
-    manager = create_db_manager_with_config(
-        tmp_path,
-        f"""
-        _templates:
-          test_mysql8:
-            host: {TEST_ENV_HOST}
-            port: 3306
-            user: ya_testing
-            password: secret
-
-        timetable_auto_y10:
-          template: test_mysql8
-          database: timetable
-
-        timetable:
-          {MYSQL_REPL_HOST}: 3306
-          ro_user: secret
-          database: timetable
-        """
-    )
-
-    assert manager.connections["timetable_auto_y10"]["database"] == "timetable"
-    assert manager.connections["timetable"]["database"] == "timetable"
 
 
 def test_connection_summary_queries_mysql_quotes_reserved_aliases(db_manager):
@@ -266,6 +275,26 @@ def test_connection_summary_queries_mysql_quotes_reserved_aliases(db_manager):
     assert "VERSION() AS `version`" in info_query
     assert "information_schema.tables" in size_query
     assert "information_schema.tables" in tables_query
+
+
+def test_execute_query_response_includes_db_type_hint(db_manager):
+    result = db_manager.execute_query_direct(
+        "SELECT 1 AS ok",
+        "crm",
+        testing=TESTING_ALPHA,
+    )
+    if result["success"]:
+        assert result["db_type"] == "postgres"
+        assert "PostgreSQL" in result["sql_dialect_hint"]
+    elif "не указан port" not in result.get("error", ""):
+        assert result.get("db_type") == "postgres"
+        assert "PostgreSQL" in result.get("sql_dialect_hint", "")
+
+
+def test_sql_dialect_hint_for_mysql(db_manager):
+    hint = DatabaseManager._sql_dialect_hint("mysql")
+    assert "DATABASE()" in hint
+    assert "`current_user`" in hint
 
 
 def test_connection_summary_queries_postgres_unchanged(db_manager):

@@ -1,5 +1,10 @@
-# Пример конфигурации подключений к БД
+# Prod-реплики (read-only через MCP без параметра testing)
+crm:
+  pgsql-crm-repl.example.com: 5432
+  readonly_user: YOUR_PASSWORD
 
-db_name:
-  db_host_name.link: port
-  user_name: user_password
+learning_groups_storage:
+  pgsql-learning-groups-storage-repl.example.com: 5432
+  readonly_user: YOUR_PASSWORD
+
+# Тестинги — отдельный файл .db-testing.yaml (см. .db-testing.yaml.example)

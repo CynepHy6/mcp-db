@@ -40,59 +40,85 @@ logger = logging.getLogger(__name__)
 class DatabaseManager:
     """Менеджер для работы с базами данных предметов"""
 
-    WRITE_ALLOWED_DATABASE_PATTERN = re.compile(r"_auto_\w\d+$")
+    TESTING_ENV_PLACEHOLDER = "{{env}}"
+
+    @staticmethod
+    def _testing_port_missing_error(engine_name: str) -> str:
+        return (
+            "Прочитать данные с тестинга невозможно — "
+            f"не указан port в .db-testing.yaml для engine «{engine_name}»"
+        )
+
+    @staticmethod
+    def _testing_type_missing_error(engine_name: str) -> str:
+        return (
+            "Прочитать данные с тестинга невозможно — "
+            f"не указан type в .db-testing.yaml для engine «{engine_name}»"
+        )
 
     @staticmethod
     def _infer_db_type(host: str, port: int) -> str:
-        """Определяет тип БД: префикс хоста для реплик, порт для тестингов."""
+        """Определяет тип БД для prod: префикс хоста реплики или стандартные порты 3306/5432."""
         host_lower = host.lower()
         if host_lower.startswith("mysql-"):
             return "mysql"
         if host_lower.startswith("pgsql-"):
             return "postgres"
 
-        port_to_db_type = {
-            3306: "mysql",    # mysql8 на тестинге
-            5432: "postgres",  # pg11
-            5532: "postgres",  # pg15
+        standard_port_to_db_type = {
+            3306: "mysql",
+            5432: "postgres",
         }
-        return port_to_db_type.get(int(port), "postgres")
+        return standard_port_to_db_type.get(int(port), "postgres")
 
-    def __init__(self, config_path: str = None):
-        # Получаем директорию скрипта
+    def __init__(self, config_path: str = None, testing_config_path: str = None):
         script_dir = os.path.dirname(os.path.abspath(__file__))
 
-        # Приоритет поиска конфигурации:
-        # 1. Параметр config_path
-        # 2. Переменная окружения MCP_DB_CONFIG
-        # 3. Локальный .db.yaml рядом с сервером
         if config_path:
             self.config_path = config_path
         elif os.getenv("MCP_DB_CONFIG"):
             self.config_path = os.getenv("MCP_DB_CONFIG")
         else:
             self.config_path = os.path.join(script_dir, ".db.yaml")
+
+        config_dir = os.path.dirname(os.path.abspath(self.config_path))
+        if testing_config_path:
+            self.testing_config_path = testing_config_path
+        elif os.getenv("MCP_DB_TESTING_CONFIG"):
+            self.testing_config_path = os.getenv("MCP_DB_TESTING_CONFIG")
+        else:
+            self.testing_config_path = os.path.join(config_dir, ".db-testing.yaml")
+
         self.connections: Dict[str, Dict] = {}
+        self.testing_config: Optional[Dict[str, Any]] = None
+        self.testing_config_error: Optional[str] = None
         self.schema_cache: Dict[str, Dict] = {}
-        # Таймаут подключения (секунды), можно переопределить через MCP_DB_CONNECT_TIMEOUT
         self.connect_timeout = int(os.getenv("MCP_DB_CONNECT_TIMEOUT", "2"))
         logger.info(f"Таймаут подключения к БД установлен: {self.connect_timeout} сек")
         self._load_db_config()
 
     def _load_db_config(self):
-        """Загружает конфигурацию подключений к БД"""
+        """Загружает prod (.db.yaml) и тестинг (.db-testing.yaml)."""
+        self._load_prod_config()
+        self._load_testing_config()
+
+    def _load_prod_config(self):
+        """Загружает prod-реплики из .db.yaml."""
         try:
             with open(self.config_path, "r", encoding="utf-8") as f:
                 db_config = yaml.safe_load(f)
 
-            templates = db_config.get("_templates", {}) if isinstance(db_config, dict) else {}
+            if not isinstance(db_config, dict):
+                raise ValueError("Конфигурация .db.yaml должна быть объектом")
 
-            # ключи это названия БД
+            if "_testing" in db_config:
+                raise ValueError(
+                    "Секция _testing в .db.yaml больше не поддерживается. "
+                    "Используйте отдельный файл .db-testing.yaml"
+                )
+
             for db_name, db_info in db_config.items():
-                if db_name == "_templates":
-                    continue
-
-                normalized_config = self._normalize_db_config_entry(db_name, db_info, templates)
+                normalized_config = self._normalize_prod_config_entry(db_name, db_info)
 
                 if normalized_config:
                     self.connections[db_name] = normalized_config
@@ -107,8 +133,37 @@ class DatabaseManager:
             logger.error(f"Файл конфигурации {self.config_path} не найден")
             raise
         except Exception as e:
-            logger.error(f"Ошибка загрузки конфигурации: {e}")
+            logger.error(f"Ошибка загрузки prod-конфигурации: {e}")
             raise
+
+    def _load_testing_config(self):
+        """Загружает тестинги из .db-testing.yaml (опционально)."""
+        try:
+            with open(self.testing_config_path, "r", encoding="utf-8") as f:
+                testing_config = yaml.safe_load(f)
+
+            if not isinstance(testing_config, dict):
+                raise ValueError("Конфигурация .db-testing.yaml должна быть объектом")
+
+            self.testing_config = self._normalize_testing_config(testing_config)
+            logger.info(
+                f"Загружен .db-testing.yaml: {len(self.testing_config['services'])} сервисов"
+            )
+        except FileNotFoundError:
+            logger.warning(
+                f"Файл тестинговой конфигурации {self.testing_config_path} не найден — "
+                "режим testing недоступен"
+            )
+        except Exception as e:
+            self.testing_config = None
+            self.testing_config_error = str(e)
+            logger.error(f"Ошибка загрузки тестинговой конфигурации: {e}")
+
+    def _ensure_testing_available(self) -> None:
+        if self.testing_config_error:
+            raise ValueError(self.testing_config_error)
+        if not self.testing_config:
+            raise ValueError("Файл .db-testing.yaml не настроен")
 
     def _parse_legacy_db_config_entry(self, db_info: Dict[str, Any]) -> Dict[str, Any]:
         """Парсит старый формат конфига вида host:port и user:password."""
@@ -116,7 +171,7 @@ class DatabaseManager:
         port = None
         user = None
         password = None
-        reserved_keys = ["block_store", "template", "host", "port", "user", "password", "type", "database"]
+        reserved_keys = ["block_store", "host", "port", "user", "password", "type", "database"]
 
         for key, value in db_info.items():
             if isinstance(value, int) and key not in reserved_keys:
@@ -136,46 +191,25 @@ class DatabaseManager:
             "database": db_info.get("database"),
         }
 
-    def _normalize_db_config_entry(
+    def _normalize_prod_config_entry(
         self,
         db_name: str,
         db_info: Dict[str, Any],
-        templates: Dict[str, Dict[str, Any]]
     ) -> Optional[Dict[str, Any]]:
-        """Нормализует запись БД из старого или шаблонного формата."""
+        """Нормализует prod-запись БД (legacy-формат host:port + user:password)."""
         if not isinstance(db_info, dict):
             raise ValueError(f"Некорректная конфигурация БД {db_name}: ожидается объект")
 
-        template_name = db_info.get("template")
-        template_config = {}
-        if template_name:
-            template_config = templates.get(template_name)
-            if not isinstance(template_config, dict):
-                raise ValueError(f"Шаблон {template_name} для БД {db_name} не найден")
-
         legacy_config = self._parse_legacy_db_config_entry(db_info)
 
-        def pick_config_value(field_name: str):
-            direct_value = db_info.get(field_name)
-            if direct_value is not None:
-                return direct_value
-
-            legacy_value = legacy_config.get(field_name)
-            if legacy_value is not None:
-                return legacy_value
-
-            return template_config.get(field_name)
-
         resolved_config = {
-            **template_config,
-            **legacy_config,
-            "host": pick_config_value("host"),
-            "port": pick_config_value("port"),
-            "user": pick_config_value("user"),
-            "password": pick_config_value("password"),
-            "block_store": pick_config_value("block_store"),
-            "type": pick_config_value("type"),
-            "database": pick_config_value("database"),
+            "host": db_info.get("host") or legacy_config.get("host"),
+            "port": db_info.get("port") or legacy_config.get("port"),
+            "user": db_info.get("user") or legacy_config.get("user"),
+            "password": db_info.get("password") or legacy_config.get("password"),
+            "block_store": db_info.get("block_store") or legacy_config.get("block_store"),
+            "type": db_info.get("type") or legacy_config.get("type"),
+            "database": db_info.get("database") or legacy_config.get("database"),
         }
 
         if not all([
@@ -193,7 +227,7 @@ class DatabaseManager:
 
         return {
             "host": host,
-            "port": resolved_config["port"],
+            "port": port,
             "database": database,
             "user": resolved_config["user"],
             "password": resolved_config["password"],
@@ -201,15 +235,159 @@ class DatabaseManager:
             "db_type": db_type,
         }
 
+    def _normalize_testing_config(self, testing_info: Dict[str, Any]) -> Dict[str, Any]:
+        """Нормализует содержимое .db-testing.yaml."""
+        if not isinstance(testing_info, dict):
+            raise ValueError("Конфигурация .db-testing.yaml должна быть объектом")
 
+        required_fields = ["user", "password", "host_template", "engines", "services"]
+        for field in required_fields:
+            if field not in testing_info:
+                raise ValueError(f"В .db-testing.yaml отсутствует обязательное поле {field}")
 
-    def _is_write_allowed_database(self, database: str) -> bool:
-        """Определяет тестовые БД, где разрешены модифицирующие запросы."""
-        return bool(self.WRITE_ALLOWED_DATABASE_PATTERN.search(database))
+        if self.TESTING_ENV_PLACEHOLDER not in testing_info["host_template"]:
+            raise ValueError(
+                f"host_template должен содержать плейсхолдер {self.TESTING_ENV_PLACEHOLDER}"
+            )
 
-    def _validate_query(self, query: str, database: str = "") -> bool:
+        engines = testing_info["engines"]
+        services = testing_info["services"]
+        if not isinstance(engines, dict) or not engines:
+            raise ValueError(".db-testing.yaml: engines должен быть непустым объектом")
+        if not isinstance(services, dict) or not services:
+            raise ValueError(".db-testing.yaml: services должен быть непустым объектом")
+
+        normalized_engines: Dict[str, Dict[str, Any]] = {}
+        for engine_name, engine_info in engines.items():
+            port, db_type = self._resolve_testing_engine_port_and_type(engine_name, engine_info)
+            normalized_engines[engine_name] = {
+                "port": port,
+                "type": db_type,
+            }
+
+        normalized_services: Dict[str, Dict[str, Any]] = {}
+        for service_name, service_info in services.items():
+            if isinstance(service_info, str):
+                normalized_services[service_name] = {"engine": service_info}
+                continue
+            if not isinstance(service_info, dict) or "engine" not in service_info:
+                raise ValueError(f"Некорректный сервис {service_name} в .db-testing.yaml")
+            normalized_services[service_name] = dict(service_info)
+
+        for service_name, service_info in normalized_services.items():
+            engine_name = service_info["engine"]
+            if engine_name not in normalized_engines:
+                raise ValueError(
+                    f"Сервис {service_name} ссылается на неизвестный engine {engine_name}"
+                )
+
+        return {
+            "user": testing_info["user"],
+            "password": testing_info["password"],
+            "host_template": testing_info["host_template"],
+            "engines": normalized_engines,
+            "services": normalized_services,
+        }
+
+    def _resolve_testing_engine_port_and_type(
+        self,
+        engine_name: str,
+        engine_info: Any,
+    ) -> Tuple[int, str]:
+        """Порт и type для engine; оба обязательны в .db-testing.yaml."""
+        if not isinstance(engine_info, dict):
+            raise ValueError(f"Некорректный engine {engine_name} в .db-testing.yaml")
+
+        if "port" not in engine_info or engine_info.get("port") is None:
+            raise ValueError(self._testing_port_missing_error(engine_name))
+
+        db_type = engine_info.get("type")
+        if not db_type:
+            raise ValueError(self._testing_type_missing_error(engine_name))
+
+        try:
+            port = int(engine_info["port"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "Прочитать данные с тестинга невозможно — "
+                f"некорректный port для engine «{engine_name}» в .db-testing.yaml: "
+                f"{engine_info['port']!r}"
+            ) from exc
+
+        if db_type not in ("mysql", "postgres"):
+            raise ValueError(
+                "Прочитать данные с тестинга невозможно — "
+                f"некорректный type для engine «{engine_name}» в .db-testing.yaml: "
+                f"{db_type!r} (ожидается mysql или postgres)"
+            )
+
+        return port, db_type
+
+    @staticmethod
+    def _testing_env_suffix(testing: str) -> str:
+        """test-alpha -> alpha; без префикса test- суффикс совпадает с testing."""
+        if testing.startswith("test-"):
+            return testing[len("test-"):]
+        return testing
+
+    def _resolve_testing_host(self, testing: str) -> str:
+        self._ensure_testing_available()
+        return self.testing_config["host_template"].replace(
+            self.TESTING_ENV_PLACEHOLDER,
+            testing,
+        )
+
+    def _resolve_testing_connection(self, testing: str, service: str) -> Dict[str, Any]:
+        """Собирает параметры подключения к БД на тестинге."""
+        self._ensure_testing_available()
+
+        service_info = self.testing_config["services"].get(service)
+        if not service_info:
+            raise ValueError(
+                f"Сервис {service} не найден в .db-testing.yaml (services). "
+                f"Добавьте его в конфиг или проверьте имя."
+            )
+
+        engine_name = service_info["engine"]
+        engine = self.testing_config["engines"][engine_name]
+        env_suffix = self._testing_env_suffix(testing)
+        database = service_info.get("database") or f"{service}_auto_{env_suffix}"
+
+        return {
+            "host": self._resolve_testing_host(testing),
+            "port": engine["port"],
+            "database": database,
+            "user": self.testing_config["user"],
+            "password": self.testing_config["password"],
+            "block_store": service_info.get("block_store"),
+            "db_type": engine["type"],
+            "engine": engine_name,
+            "testing": testing,
+            "service": service,
+        }
+
+    def _resolve_target(
+        self,
+        service: str,
+        testing: Optional[str] = None,
+    ) -> Tuple[str, Dict[str, Any]]:
+        """Возвращает (логический_ключ, конфиг_подключения) для prod или тестинга."""
+        if testing:
+            conn = self._resolve_testing_connection(testing, service)
+            return f"{service}@{testing}", conn
+
+        if service not in self.connections:
+            raise ValueError(f"БД {service} не найдена в конфигурации")
+
+        return service, self.connections[service]
+
+    def _is_write_allowed(self, testing: Optional[str] = None) -> bool:
+        """На тестингах разрешены модифицирующие запросы."""
+        return testing is not None
+
+    def _validate_query(self, query: str, testing: Optional[str] = None) -> bool:
         """Валидирует SQL запрос - запрещены только модифицирующие операции (INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, TRUNCATE, GRANT, REVOKE, EXEC, EXECUTE)"""
-        if self._is_write_allowed_database(database):
+        if self._is_write_allowed(testing):
             return True
 
         query_clean = re.sub(r'--.*$', '', query, flags=re.MULTILINE)
@@ -234,12 +412,8 @@ class DatabaseManager:
                 return False
         return True
 
-    def _get_connection(self, db_name: str):
-        """Получает подключение к БД"""
-        if db_name not in self.connections:
-            raise ValueError(f"БД {db_name} не найдена в конфигурации")
-
-        conn_config = self.connections[db_name]
+    def _get_connection(self, logical_key: str, conn_config: Dict[str, Any]):
+        """Получает подключение к БД по нормализованному конфигу."""
         db_type = conn_config.get("db_type", "postgres")
 
         try:
@@ -264,7 +438,7 @@ class DatabaseManager:
                 )
             return conn
         except Exception as e:
-            logger.error(f"Ошибка подключения к БД {db_name}: {e}")
+            logger.error(f"Ошибка подключения к БД {logical_key}: {e}")
             raise
 
     def _cursor(self, conn, db_type: str):
@@ -314,10 +488,9 @@ class DatabaseManager:
 
 
 
-    def _get_block_store_info(self, db_name: str) -> Dict[str, str]:
-        """Получает информацию о блок-сторе для указанной БД"""
-        connection_config = self.connections.get(db_name, {})
-        block_store_db = connection_config.get("block_store")
+    def _get_block_store_info(self, conn_config: Dict[str, Any]) -> Dict[str, str]:
+        """Получает информацию о блок-сторе для указанной БД."""
+        block_store_db = conn_config.get("block_store")
         if block_store_db:
             return {
                 "block_store_database": block_store_db,
@@ -326,12 +499,51 @@ class DatabaseManager:
 
         return {}
 
-    def _fetch_one_database_for_list(self, db_name: str) -> Tuple[str, Dict]:
+    @staticmethod
+    def _sql_dialect_hint(db_type: str) -> str:
+        if db_type == "mysql":
+            return (
+                "MySQL: DATABASE(), USER() или CURRENT_USER() AS `current_user`, VERSION(); "
+                "зарезервированные слова в алиасах — обратные кавычки"
+            )
+        return (
+            "PostgreSQL: current_database(), current_user, version(); "
+            "регистрозависимые идентификаторы — в двойных кавычках"
+        )
+
+    def _query_response_context(self, conn_config: Dict[str, Any]) -> Dict[str, Any]:
+        db_type = conn_config.get("db_type", "postgres")
+        context = {
+            "db_type": db_type,
+            "sql_dialect_hint": self._sql_dialect_hint(db_type),
+        }
+        if conn_config.get("engine"):
+            context["engine"] = conn_config["engine"]
+        return context
+
+    def _connection_config_summary(self, conn_config: Dict[str, Any]) -> Dict[str, Any]:
+        summary = {
+            "host": conn_config["host"],
+            "database": conn_config["database"],
+            "user": conn_config["user"],
+            "db_type": conn_config.get("db_type", "postgres"),
+            "sql_dialect_hint": self._sql_dialect_hint(conn_config.get("db_type", "postgres")),
+            "testing": conn_config.get("testing"),
+            "service": conn_config.get("service"),
+        }
+        if conn_config.get("engine"):
+            summary["engine"] = conn_config["engine"]
+        return summary
+
+    def _fetch_one_database_for_list(
+        self,
+        logical_key: str,
+        conn_config: Dict[str, Any],
+    ) -> Tuple[str, Dict]:
         """Собирает информацию по одной БД для list_databases (для вызова из пула потоков)."""
-        config = self.connections[db_name]
-        db_type = config.get("db_type", "postgres")
+        db_type = conn_config.get("db_type", "postgres")
         try:
-            with self._get_connection(db_name) as conn:
+            with self._get_connection(logical_key, conn_config) as conn:
                 with self._cursor(conn, db_type) as cur:
                     info_query, size_query, tables_query = self._connection_summary_queries(db_type)
                     cur.execute(info_query)
@@ -347,74 +559,85 @@ class DatabaseManager:
                     entry = {
                         **db_info,
                         **tables_info,
-                        "connection_config": {
-                            "host": config["host"],
-                            "database": config["database"],
-                            "user": config["user"],
-                            "db_type": db_type,
-                        },
+                        "connection_config": self._connection_config_summary(conn_config),
                         "available": True,
-                        **self._get_block_store_info(db_name)
+                        **self._get_block_store_info(conn_config)
                     }
-                    return (db_name, entry)
+                    return (logical_key, entry)
 
         except Exception as e:
             entry = {
                 "available": False,
                 "error": str(e),
-                "connection_config": {
-                    "host": config["host"],
-                    "database": config["database"],
-                    "user": config["user"],
-                    "db_type": db_type,
-                },
-                **self._get_block_store_info(db_name)
+                "connection_config": self._connection_config_summary(conn_config),
+                **self._get_block_store_info(conn_config)
             }
-            return (db_name, entry)
+            return (logical_key, entry)
 
-    def list_databases(self) -> Dict[str, Dict]:
-        """Возвращает список всех БД с информацией (параллельные подключения)."""
-        db_names = list(self.connections.keys())
-        if not db_names:
+    def list_databases(self, testing: Optional[str] = None) -> Dict[str, Dict]:
+        """Возвращает список БД с информацией (параллельные подключения)."""
+        if testing:
+            self._ensure_testing_available()
+
+            targets = [
+                (f"{service}@{testing}", self._resolve_testing_connection(testing, service))
+                for service in self.testing_config["services"]
+            ]
+        else:
+            targets = [
+                (name, self.connections[name])
+                for name in self.connections
+            ]
+
+        if not targets:
             return {}
 
         max_workers_env = os.getenv("MCP_DB_LIST_MAX_WORKERS")
         if max_workers_env:
             max_workers = max(1, int(max_workers_env))
         else:
-            max_workers = min(16, len(db_names))
+            max_workers = min(16, len(targets))
 
         databases_info: Dict[str, Dict] = {}
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
-                executor.submit(self._fetch_one_database_for_list, name): name
-                for name in db_names
+                executor.submit(self._fetch_one_database_for_list, key, config): key
+                for key, config in targets
             }
             for future in as_completed(futures):
-                db_name, entry = future.result()
-                databases_info[db_name] = entry
+                logical_key, entry = future.result()
+                databases_info[logical_key] = entry
 
-        # Порядок ключей как в конфиге (а не порядок завершения запросов)
-        return {name: databases_info[name] for name in db_names}
+        ordered_keys = [key for key, _ in targets]
+        return {name: databases_info[name] for name in ordered_keys if name in databases_info}
 
-    def execute_query_direct(self, query: str, database: str) -> Dict[str, Any]:
-        """Выполняет SQL запрос к БД напрямую"""
-        if not self._validate_query(query, database):
+    def execute_query_direct(
+        self,
+        query: str,
+        service: str,
+        testing: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Выполняет SQL запрос к БД напрямую."""
+        if not self._validate_query(query, testing):
             raise ValueError("Запрос содержит недопустимые операции")
 
-        if database not in self.connections:
+        start_time = time.time()
+        try:
+            logical_key, conn_config = self._resolve_target(service, testing)
+        except ValueError as e:
             return {
                 "success": False,
-                "error": f"БД {database} не найдена в конфигурации",
-                "database": database,
-                "execution_time": 0
+                "error": str(e),
+                "service": service,
+                "testing": testing,
+                "execution_time": 0,
             }
 
-        start_time = time.time()
-        db_type = self.connections[database].get("db_type", "postgres")
+        query_context = self._query_response_context(conn_config)
+        db_type = conn_config.get("db_type", "postgres")
 
         try:
-            with self._get_connection(database) as conn:
+            with self._get_connection(logical_key, conn_config) as conn:
                 with self._cursor(conn, db_type) as cur:
                     cur.execute(query)
 
@@ -424,45 +647,56 @@ class DatabaseManager:
                     else:
                         results = []
 
-                    if db_type == "mysql" and self._is_write_allowed_database(database):
+                    if db_type == "mysql" and self._is_write_allowed(testing):
                         conn.commit()
 
                     execution_time = time.time() - start_time
 
-                    logger.info(f"Запрос к БД {database} выполнен за {execution_time:.3f}с")
+                    logger.info(f"Запрос к БД {logical_key} выполнен за {execution_time:.3f}с")
 
                     return {
                         "success": True,
                         "data": results,
                         "rows_count": len(results),
                         "execution_time": execution_time,
-                        "database": database
+                        "service": service,
+                        "testing": testing,
+                        "database": conn_config["database"],
+                        **query_context,
                     }
 
         except Exception as e:
-            logger.error(f"Ошибка выполнения запроса к БД {database}: {e}")
+            logger.error(f"Ошибка выполнения запроса к БД {logical_key}: {e}")
             return {
                 "success": False,
                 "error": str(e),
-                "database": database,
-                "execution_time": time.time() - start_time
+                "service": service,
+                "testing": testing,
+                "execution_time": time.time() - start_time,
+                **query_context,
             }
 
 
-    def get_database_info_direct(self, database: str) -> Dict[str, Any]:
-        """Получает детальную информацию о БД напрямую"""
-        if database not in self.connections:
+    def get_database_info_direct(
+        self,
+        service: str,
+        testing: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Получает детальную информацию о БД напрямую."""
+        try:
+            logical_key, config = self._resolve_target(service, testing)
+        except ValueError as e:
             return {
                 "success": False,
-                "error": f"БД {database} не найдена в конфигурации",
-                "database": database
+                "error": str(e),
+                "service": service,
+                "testing": testing,
             }
 
-        config = self.connections[database]
         db_type = config.get("db_type", "postgres")
 
         try:
-            with self._get_connection(database) as conn:
+            with self._get_connection(logical_key, config) as conn:
                 with self._cursor(conn, db_type) as cur:
                     info_query, size_query, tables_query = self._connection_summary_queries(db_type)
                     cur.execute(info_query)
@@ -498,46 +732,48 @@ class DatabaseManager:
 
                     return {
                         "success": True,
-                        "database": database,
+                        "service": service,
+                        "testing": testing,
+                        "database": config["database"],
                         "info": db_info,
                         "tables": tables,
                         "tables_count": len(tables),
-                        "connection_config": {
-                            "host": config["host"],
-                            "database": config["database"],
-                            "user": config["user"],
-                            "db_type": db_type,
-                        },
-                        **self._get_block_store_info(database)
+                        "connection_config": self._connection_config_summary(config),
+                        **self._get_block_store_info(config)
                     }
 
         except Exception as e:
-            logger.error(f"Ошибка получения информации о БД {database}: {e}")
+            logger.error(f"Ошибка получения информации о БД {logical_key}: {e}")
             return {
                 "success": False,
                 "error": str(e),
-                "database": database,
-                "connection_config": {
-                    "host": config["host"],
-                    "database": config["database"],
-                    "user": config["user"],
-                    "db_type": db_type,
-                },
-                **self._get_block_store_info(database)
+                "service": service,
+                "testing": testing,
+                "connection_config": self._connection_config_summary(config),
+                **self._get_block_store_info(config)
             }
-    def get_tables_schemas_direct(self, database: str, table_names: Optional[List[str]] = None) -> Dict[str, Any]:
-        """Получает схемы указанных таблиц или всех таблиц в БД"""
-        if database not in self.connections:
+
+    def get_tables_schemas_direct(
+        self,
+        service: str,
+        testing: Optional[str] = None,
+        table_names: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Получает схемы указанных таблиц или всех таблиц в БД."""
+        try:
+            logical_key, conn_config = self._resolve_target(service, testing)
+        except ValueError as e:
             return {
                 "success": False,
-                "error": f"БД {database} не найдена в конфигурации",
-                "database": database
+                "error": str(e),
+                "service": service,
+                "testing": testing,
             }
 
-        db_type = self.connections[database].get("db_type", "postgres")
+        db_type = conn_config.get("db_type", "postgres")
 
         try:
-            with self._get_connection(database) as conn:
+            with self._get_connection(logical_key, conn_config) as conn:
                 with self._cursor(conn, db_type) as cur:
                     table_filter = ""
                     params = []
@@ -637,26 +873,65 @@ class DatabaseManager:
 
                     return {
                         "success": True,
-                        "database": database,
+                        "service": service,
+                        "testing": testing,
+                        "database": conn_config["database"],
                         "tables": tables,
                         "tables_count": len(tables),
                         "requested_tables": table_names
                     }
 
         except Exception as e:
-            logger.error(f"Ошибка получения схем таблиц для БД {database}: {e}")
+            logger.error(f"Ошибка получения схем таблиц для БД {logical_key}: {e}")
             return {
                 "success": False,
                 "error": str(e),
-                "database": database,
+                "service": service,
+                "testing": testing,
                 "requested_tables": table_names
             }
 
 # Создаем экземпляр менеджера БД
 db_manager = DatabaseManager()
 
+MCP_SERVER_INSTRUCTIONS = """
+MCP user-DB: prod-реплики и тестинги Skyeng Platform.
+
+Параметры:
+- service — имя сервиса/БД (crm, timetable, learning_groups_storage, …)
+- testing — имя окружения для тестинга (my-env, test-alpha, …); без testing = prod (read-only)
+
+Перед первым SQL к незнакомому service вызови get_database_info или list_databases и смотри connection_config.db_type.
+SQL пиши в синтаксисе db_type из ответа; execute_query тоже возвращает db_type и sql_dialect_hint.
+
+PostgreSQL (большинство сервисов, engines pg11/pg15/pg9):
+- current_database(), current_user, version()
+- SHOW TABLES нет — information_schema или get_tables_schemas
+
+MySQL (например timetable → engine mysql8):
+- DATABASE(), USER() или CURRENT_USER() AS `current_user`, VERSION()
+- зарезервированные алиасы (current_user, order, …) — обратные кавычки
+
+Безопасность: prod без testing — только SELECT/WITH/EXPLAIN; с testing — любые SQL.
+Ошибка конфига тестинга (нет port и т.п.) — в error от execute_query, prod не затрагивается.
+""".strip()
+
 # Создаем MCP сервер
-server = Server("mcp-db")
+server = Server("mcp-db", instructions=MCP_SERVER_INSTRUCTIONS)
+
+def _service_schema_description() -> str:
+    return (
+        "Имя сервиса/БД: для prod — ключ в .db.yaml (crm, learning_groups_storage); "
+        "для тестинга — имя из .db-testing.yaml services (crm, trm, timetable)"
+    )
+
+
+def _testing_schema_description() -> str:
+    return (
+        "Имя тестинга/стейджинга (my-env, test-alpha). "
+        "При указании подключение строится из .db-testing.yaml"
+    )
+
 
 @server.list_tools()
 async def list_tools() -> list[Tool]:
@@ -664,20 +939,32 @@ async def list_tools() -> list[Tool]:
     return [
         Tool(
             name="execute_query",
-            description="Выполнить SQL запрос к БД. Для обычных БД разрешено только чтение; для ключей конфига *_auto_<env> — любые запросы",
+            description=(
+                "Выполнить SQL к service [, testing]. Prod — read-only; testing — любые SQL. "
+                "Ответ содержит db_type и sql_dialect_hint — используй их для синтаксиса. "
+                "При syntax error пересобери запрос под db_type; для mysql не используй "
+                "postgres-алиасы без обратных кавычек"
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "SQL запрос. Для обычных БД только SELECT, WITH, EXPLAIN; для ключей конфига *_auto_y10/*_auto_s2 — любые запросы"
+                        "description": (
+                            "SQL в диалекте db_type целевой БД. "
+                            "Неизвестен db_type — сначала get_database_info(service[, testing])"
+                        )
                     },
-                    "database": {
+                    "service": {
                         "type": "string",
-                        "description": "Ключ записи в .db.yaml (не имя БД на сервере из поля database)"
+                        "description": _service_schema_description()
+                    },
+                    "testing": {
+                        "type": "string",
+                        "description": _testing_schema_description()
                     }
                 },
-                "required": ["query", "database"]
+                "required": ["query", "service"]
             }
         ),
         Tool(
@@ -686,9 +973,13 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "database": {
+                    "service": {
                         "type": "string",
-                        "description": "Ключ записи в .db.yaml"
+                        "description": _service_schema_description()
+                    },
+                    "testing": {
+                        "type": "string",
+                        "description": _testing_schema_description()
                     },
                     "table_names": {
                         "type": "array",
@@ -696,29 +987,44 @@ async def list_tools() -> list[Tool]:
                         "description": "Список названий таблиц (необязательно, если не указан - возвращает все таблицы)"
                     }
                 },
-                "required": ["database"]
+                "required": ["service"]
             }
         ),
         Tool(
             name="list_databases",
-            description="Получить список всех доступных БД",
+            description=(
+                "Список БД и статус подключения. Без testing — prod-реплики из .db.yaml; "
+                "с testing — каталог services из .db-testing.yaml на указанном тестинге"
+            ),
             inputSchema={
                 "type": "object",
-                "properties": {}
+                "properties": {
+                    "testing": {
+                        "type": "string",
+                        "description": _testing_schema_description()
+                    }
+                }
             }
         ),
         Tool(
             name="get_database_info",
-            description="Получить детальную информацию о БД",
+            description=(
+                "Информация о БД: таблицы, размер, connection_config.db_type и sql_dialect_hint. "
+                "Вызывай перед первым execute_query к новому service"
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "database": {
+                    "service": {
                         "type": "string",
-                        "description": "Ключ записи в .db.yaml"
+                        "description": _service_schema_description()
+                    },
+                    "testing": {
+                        "type": "string",
+                        "description": _testing_schema_description()
                     }
                 },
-                "required": ["database"]
+                "required": ["service"]
             }
         ),
 
@@ -731,53 +1037,57 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     try:
         if name == "execute_query":
             query = arguments.get("query")
-            database = arguments.get("database")
+            service = arguments.get("service")
+            testing = arguments.get("testing")
 
-            if not query or not database:
+            if not query or not service:
                 return [TextContent(
                     type="text",
-                    text="Ошибка: необходимо указать query и database"
+                    text="Ошибка: необходимо указать query и service"
                 )]
 
-            result = db_manager.execute_query_direct(query, database)
+            result = db_manager.execute_query_direct(query, service, testing)
             return [TextContent(
                 type="text",
                 text=json.dumps(result, ensure_ascii=False, indent=2, default=str)
             )]
 
         elif name == "get_tables_schemas":
-            database = arguments.get("database")
+            service = arguments.get("service")
+            testing = arguments.get("testing")
             table_names = arguments.get("table_names")
 
-            if not database:
+            if not service:
                 return [TextContent(
                     type="text",
-                    text="Ошибка: необходимо указать database"
+                    text="Ошибка: необходимо указать service"
                 )]
 
-            result = db_manager.get_tables_schemas_direct(database, table_names)
+            result = db_manager.get_tables_schemas_direct(service, testing, table_names)
             return [TextContent(
                 type="text",
                 text=json.dumps(result, ensure_ascii=False, indent=2, default=str)
             )]
 
         elif name == "list_databases":
-            result = db_manager.list_databases()
+            testing = arguments.get("testing")
+            result = db_manager.list_databases(testing)
             return [TextContent(
                 type="text",
                 text=json.dumps(result, ensure_ascii=False, indent=2, default=str)
             )]
 
         elif name == "get_database_info":
-            database = arguments.get("database")
+            service = arguments.get("service")
+            testing = arguments.get("testing")
 
-            if not database:
+            if not service:
                 return [TextContent(
                     type="text",
-                    text="Ошибка: необходимо указать database"
+                    text="Ошибка: необходимо указать service"
                 )]
 
-            result = db_manager.get_database_info_direct(database)
+            result = db_manager.get_database_info_direct(service, testing)
             return [TextContent(
                 type="text",
                 text=json.dumps(result, ensure_ascii=False, indent=2, default=str)
@@ -803,16 +1113,18 @@ def show_help():
     print("Использование:")
     print("  ./mcp-server                  - Запуск MCP сервера")
     print("  ./mcp-server --help           - Показать эту справку")
-    print("  ./mcp-server --list-databases - Показать все БД и статус подключения")
-    print("  ./mcp-server --test           - Проверить подключения ко всем БД\n")
+    print("  ./mcp-server --list-databases [my-env] - Prod или каталог тестинга")
+    print("  ./mcp-server --test [my-env]           - Проверить подключения\n")
     print("Доступные инструменты MCP:")
-    print("  • execute_query         - Выполнить SQL запрос к БД; для *_auto_y10/*_auto_s2 и подобных тестовых БД разрешены любые запросы")
-    print("  • get_tables_schemas    - Получить схемы указанных таблиц или всех таблиц в БД")
-    print("  • list_databases        - Список всех доступных БД и их статус")
-    print("  • get_database_info     - Детальная информация о БД (размер, таблицы)\n")
+    print("  • execute_query         - SQL к prod (service) или тестингу (service + testing)")
+    print("  • get_tables_schemas    - Схемы таблиц (service [, testing])")
+    print("  • list_databases        - Prod-реплики или каталог тестинга (list_databases + testing)")
+    print("  • get_database_info     - Детальная информация о БД (service [, testing])\n")
     print("Конфигурация:")
-    print("  .db.yaml рядом с mcp-db-server.py — настройки подключений к БД (по умолчанию)")
-    print("  MCP_DB_CONFIG=/absolute/path/to/.db.yaml — переопределить путь к конфигу")
+    print("  .db.yaml         — prod-реплики (по умолчанию рядом с mcp-db-server.py)")
+    print("  .db-testing.yaml — тестинги (рядом с .db.yaml)")
+    print("  MCP_DB_CONFIG=/path/to/.db.yaml — prod-конфиг")
+    print("  MCP_DB_TESTING_CONFIG=/path/to/.db-testing.yaml — тестинг-конфиг")
 
 async def main():
     """Запуск MCP сервера"""
@@ -827,9 +1139,11 @@ async def main():
             return
 
         elif arg == '--list-databases':
+            testing = sys.argv[2] if len(sys.argv) > 2 else None
             try:
-                databases = db_manager.list_databases()
-                print("Доступные базы данных:")
+                databases = db_manager.list_databases(testing)
+                label = f"тестинг {testing}" if testing else "prod"
+                print(f"Доступные базы данных ({label}):")
                 for db_name, info in databases.items():
                     status = "✅" if info.get("available", False) else "❌"
                     print(f"  {status} {db_name}")
@@ -843,9 +1157,11 @@ async def main():
                 print(f"Ошибка: {e}")
             return
         elif arg == '--test':
+            testing = sys.argv[2] if len(sys.argv) > 2 else None
             try:
-                print("🔍 Тестирование подключений...")
-                databases = db_manager.list_databases()
+                label = f"тестинг {testing}" if testing else "prod"
+                print(f"🔍 Тестирование подключений ({label})...")
+                databases = db_manager.list_databases(testing)
                 working_count = 0
                 for db_name, info in databases.items():
                     status = "✅" if info.get("available", False) else "❌"

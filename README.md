@@ -1,182 +1,95 @@
 # MCP сервер для работы с БД
 
-Безопасный MCP (Model Context Protocol) сервер для работы с базами данных Skyeng Platform без передачи кредов в удаленное API.
+Безопасный MCP (Model Context Protocol) сервер для работы с базами данных без передачи кредов в удаленное API.
 
-## 🎯 Возможности
+## Возможности
 
-- **Безопасность**: для обычных БД только SELECT, WITH, EXPLAIN; для ключей конфига вида `*_auto_<env>` разрешены любые запросы
-- **Простота**: прямая работа с БД по названию
-- **Кэширование**: схемы таблиц кэшируются для быстрого доступа
-- **Мониторинг**: логирование всех запросов и производительности
+- **Безопасность**: prod (без `testing`) — только SELECT/WITH/EXPLAIN; тестинг (`testing` задан) — любые SQL
+- **Два конфига**: `.db.yaml` (prod) и `.db-testing.yaml` (тестинги)
+- **Мониторинг**: логирование запросов в `mcp-db-server.log`
 
-
-## 🚀 Установка
+## Установка
 
 ```bash
-# Клонируем проект
 git clone https://github.com/CynepHy6/mcp-db.git mcp-db
 cd mcp-db
-
-# Создаем виртуальное окружение и устанавливаем зависимости
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements-mcp.txt
 ```
 
-## ⚙️ Настройка
-
-### 1. Настройка кредов БД
+## Настройка
 
 ```bash
-# Копируем пример конфигурации
 cp .db.yaml.example .db.yaml
-
-# Редактируем файл с кредами
-nano .db.yaml
+cp .db-testing.yaml.example .db-testing.yaml
+# Заполните креды в обоих файлах
 ```
 
-Пример содержимого `.db.yaml` в старом формате:
+### Prod — `.db.yaml`
+
 ```yaml
-db_name:
-  db_host_name.link: port
-  user_name: user_password
+crm:
+  pgsql-crm-repl.example.com: 5432
+  readonly_user: password
 ```
 
-Рекомендуемый формат для тестинговых БД:
+### Тестинг — `.db-testing.yaml`
+
+Каталог сервисов — в `.db-testing.yaml.example` (386 сервисов, без кредов).
+
 ```yaml
-_templates:
-  test_y10_pg11:
-    host: test-y10-local.skyeng.link
-    port: 5432
-    user: ya_testing
-    password: your_password
-  test_y10_pg15:
-    host: test-y10-local.skyeng.link
-    port: 5532
-    user: ya_testing
-    password: your_password
-
-skysmart_english_auto_y10:
-  template: test_y10_pg11
-
-trm_auto_y10:
-  template: test_y10_pg11
-
-teacher_catalog_auto_y10:
-  template: test_y10_pg15
-
-crm_auto_y10:
-  template: test_y10_pg15
+user: YOUR_TESTING_USER
+password: YOUR_TESTING_PASSWORD
+host_template: "{{env}}-example.com"   # example.com → реальный суффикс хоста БД тестинга
+engines:                               # port и type обязательны; port — из инфраструктуры тестинга
+  mysql8: { port: 0, type: mysql }
+  pg11:   { port: 0, type: postgres }
+  pg15:   { port: 0, type: postgres }
+  pg9:    { port: 0, type: postgres }
+services:
+  crm: pg15
+  trm: pg11
+  timetable:
+    engine: mysql8
+    database: timetable
 ```
 
-При необходимости можно переопределить отдельные поля поверх шаблона:
-```yaml
-teacher_catalog_auto_y10:
-  template: test_y10_pg11
-  port: 5532
-```
+Пути по умолчанию: оба файла рядом с `mcp-db-server.py`. Переопределение:
 
-Если имя БД на сервере не совпадает с ключом в конфиге, задайте поле `database`:
-```yaml
-service_auto_env:
-  template: test_mysql
-  database: actual_db_name
-```
+- `MCP_DB_CONFIG` — prod
+- `MCP_DB_TESTING_CONFIG` — тестинг
 
-Оба формата поддерживаются: старый плоский формат остается рабочим для обратной совместимости.
+## MCP-инструменты
 
-Тип СУБД определяется автоматически:
-- для реплик — по префиксу хоста: `mysql-*` → MySQL, `pgsql-*` → PostgreSQL;
-- для тестингов (хост без префикса) — по порту:
-  - `3306` → MySQL (mysql8);
-  - `5432` → PostgreSQL (pg11);
-  - `5532` → PostgreSQL (pg15);
-- явное поле `type` в конфиге переопределяет автоопределение.
-
-### 2. Настройка таймаута подключения (опционально)
-
-По умолчанию таймаут подключения к БД составляет 2 секунды. При необходимости можно изменить через переменную окружения:
-
-```bash
-# Быстрая проверка (может пропустить БД при небольших задержках)
-export MCP_DB_CONNECT_TIMEOUT=1
-
-# Более надежное подключение (для нестабильной сети)
-export MCP_DB_CONNECT_TIMEOUT=3
-```
-
-Инструмент `list_databases` опрашивает все БД параллельно (до 16 одновременных подключений по умолчанию). Число потоков можно задать так:
-
-```bash
-export MCP_DB_LIST_MAX_WORKERS=8
-```
-
-### 3. Тестирование
-
-```bash
-# Активируем виртуальное окружение
-source venv/bin/activate
-
-# Тестируем подключение к БД
-python3 mcp-db-server.py
-```
-
-### 4. Интеграция с Cursor
-
-По умолчанию сервер читает `.db.yaml` из каталога `mcp-db`. Чтобы указать другой файл, задайте `MCP_DB_CONFIG` — абсолютный путь к YAML с кредами.
-
-Добавьте в `~/.cursor/mcp.json`:
+| Инструмент | Prod | Тестинг |
+|---|---|---|
+| `execute_query` | `service`, `query` | + `testing` |
+| `get_tables_schemas` | `service` | + `testing` |
+| `get_database_info` | `service` | + `testing` |
+| `list_databases` | без параметров | `testing` |
 
 ```json
 {
-  "mcpServers": {
-    "DB": {
-      "command": "/absolute/path/to/mcp-db/mcp-server",
-      "env": {
-        "MCP_DB_CONFIG": "/absolute/path/to/.db.yaml",
-      }
-    }
-  }
+  "service": "crm",
+  "testing": "my-env",
+  "query": "SELECT 1"
 }
 ```
 
-Если `MCP_DB_CONFIG` не задан, используется `/absolute/path/to/mcp-db/.db.yaml` рядом с сервером — тогда блок `env` можно убрать целиком:
+## Диагностика
 
-```json
-{
-  "mcpServers": {
-    "DB": {
-      "command": "/absolute/path/to/mcp-db/mcp-server"
-    }
-  }
-}
+```bash
+./mcp-server --test
+./mcp-server --test my-env
+./mcp-server --list-databases my-env
+venv/bin/python -m pytest test_mcp_db_server.py -q
 ```
 
-## 🔒 Безопасность
+Опционально: `MCP_DB_CONNECT_TIMEOUT`, `MCP_DB_LIST_MAX_WORKERS`.
 
-- Только чтение для обычных БД: разрешены только немодифицирующие запросы
-- Тестовые ключи в конфиге вида `*_auto_<env>`: разрешены любые запросы, если ключ в `.db.yaml` (параметр `database` в MCP) совпадает с шаблоном `_auto_\w\d+`; поле `database` с именем БД на сервере на это не влияет
-- Локальные креды: пароли хранятся только локально в `.db.yaml`
-- Валидация запросов: фильтрация опасных операций и поддержка шаблонов `_templates` в конфиге
-- Логирование: все запросы записываются в `mcp-db-server.log`
+## Безопасность
 
-## 📁 Структура проекта
-
-```
-mcp-db/
-├── mcp-db-server.py          # Основной сервер
-├── mcp-server               # Исполняемый скрипт-обертка
-├── venv/                    # Виртуальное окружение
-├── requirements-mcp.txt      # Зависимости Python
-├── .db.yaml                 # Креды БД (создается вручную)
-├── .db.yaml.example         # Пример конфигурации
-└── README.md               # Документация
-```
-
-## 🔧 Диагностика
-
-При возникновении проблем:
-
-1. Проверьте логи в `mcp-db-server.log`
-2. Убедитесь что `.db.yaml` содержит правильные креды
-3. Тестируйте подключение: `./mcp-server --test`
+- Prod без `testing` — read-only
+- С `testing` — write разрешён
+- `.db.yaml` и `.db-testing.yaml` не в git
