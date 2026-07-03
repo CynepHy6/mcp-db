@@ -41,6 +41,9 @@ class DatabaseManager:
     """Менеджер для работы с базами данных предметов"""
 
     TESTING_ENV_PLACEHOLDER = "{{env}}"
+    # Стейджинги именуются s2, s6, ... (без префикса test-); тестинги — test-yNN
+    # или произвольные имена (test-alpha, my-env). См. .cursor/rules/glossary.mdc.
+    STAGING_ENV_PATTERN = re.compile(r"^s\d+$")
 
     @staticmethod
     def _testing_port_missing_error(engine_name: str) -> str:
@@ -250,6 +253,12 @@ class DatabaseManager:
                 f"host_template должен содержать плейсхолдер {self.TESTING_ENV_PLACEHOLDER}"
             )
 
+        staging_host_template = testing_info.get("staging_host_template")
+        if staging_host_template and self.TESTING_ENV_PLACEHOLDER not in staging_host_template:
+            raise ValueError(
+                f"staging_host_template должен содержать плейсхолдер {self.TESTING_ENV_PLACEHOLDER}"
+            )
+
         engines = testing_info["engines"]
         services = testing_info["services"]
         if not isinstance(engines, dict) or not engines:
@@ -285,6 +294,7 @@ class DatabaseManager:
             "user": testing_info["user"],
             "password": testing_info["password"],
             "host_template": testing_info["host_template"],
+            "staging_host_template": staging_host_template,
             "engines": normalized_engines,
             "services": normalized_services,
         }
@@ -330,12 +340,19 @@ class DatabaseManager:
             return testing[len("test-"):]
         return testing
 
+    @classmethod
+    def _is_staging_env(cls, testing: str) -> bool:
+        """Стейджинги именуются s2, s6, ... — отличаются от тестингов (test-yNN, my-env)."""
+        return bool(cls.STAGING_ENV_PATTERN.match(testing))
+
     def _resolve_testing_host(self, testing: str) -> str:
         self._ensure_testing_available()
-        return self.testing_config["host_template"].replace(
-            self.TESTING_ENV_PLACEHOLDER,
-            testing,
-        )
+        staging_host_template = self.testing_config.get("staging_host_template")
+        if staging_host_template and self._is_staging_env(testing):
+            template = staging_host_template
+        else:
+            template = self.testing_config["host_template"]
+        return template.replace(self.TESTING_ENV_PLACEHOLDER, testing)
 
     def _resolve_testing_connection(self, testing: str, service: str) -> Dict[str, Any]:
         """Собирает параметры подключения к БД на тестинге."""
@@ -411,6 +428,24 @@ class DatabaseManager:
             if re.search(rf'\\b{dangerous}\\b', query_clean):
                 return False
         return True
+
+    @staticmethod
+    def _looks_like_write_query(query: str) -> bool:
+        """Эвристика для advisory-предупреждения: то же разбиение read/write, что и в _validate_query."""
+        query_clean = re.sub(r'--.*$', '', query, flags=re.MULTILINE)
+        query_clean = re.sub(r'/\*.*?\*/', '', query_clean, flags=re.DOTALL)
+        query_clean = query_clean.strip().upper()
+        read_keywords = ('SELECT', 'WITH', 'EXPLAIN', 'SHOW', 'DESCRIBE', 'VALUES')
+        return not query_clean.startswith(read_keywords)
+
+    def _staging_write_caution(self, testing: Optional[str], query: str) -> Optional[str]:
+        """Стейджинг технически не блокирует write (как и любой testing), но менять данные напрямую не рекомендуется."""
+        if not testing or not self._is_staging_env(testing) or not self._looks_like_write_query(query):
+            return None
+        return (
+            "Стейджинг: прямое изменение данных технически не блокируется (не опасно для прод-пользователей), "
+            "но не рекомендуется без явной необходимости — предпочитай SELECT."
+        )
 
     def _get_connection(self, logical_key: str, conn_config: Dict[str, Any]):
         """Получает подключение к БД по нормализованному конфигу."""
@@ -635,6 +670,7 @@ class DatabaseManager:
 
         query_context = self._query_response_context(conn_config)
         db_type = conn_config.get("db_type", "postgres")
+        caution = self._staging_write_caution(testing, query)
 
         try:
             with self._get_connection(logical_key, conn_config) as conn:
@@ -654,7 +690,7 @@ class DatabaseManager:
 
                     logger.info(f"Запрос к БД {logical_key} выполнен за {execution_time:.3f}с")
 
-                    return {
+                    response = {
                         "success": True,
                         "data": results,
                         "rows_count": len(results),
@@ -664,10 +700,13 @@ class DatabaseManager:
                         "database": conn_config["database"],
                         **query_context,
                     }
+                    if caution:
+                        response["caution"] = caution
+                    return response
 
         except Exception as e:
             logger.error(f"Ошибка выполнения запроса к БД {logical_key}: {e}")
-            return {
+            error_response = {
                 "success": False,
                 "error": str(e),
                 "service": service,
@@ -675,6 +714,9 @@ class DatabaseManager:
                 "execution_time": time.time() - start_time,
                 **query_context,
             }
+            if caution:
+                error_response["caution"] = caution
+            return error_response
 
 
     def get_database_info_direct(
@@ -913,6 +955,9 @@ MySQL (например timetable → engine mysql8):
 - зарезервированные алиасы (current_user, order, …) — обратные кавычки
 
 Безопасность: prod без testing — только SELECT/WITH/EXPLAIN; с testing — любые SQL.
+Стейджинги (s2, s6, ...) — тот же параметр testing; технически запись разрешена и не опасна
+для прод-пользователей, но прямое изменение данных на стейджинге не рекомендуется без явной
+необходимости — предпочитай SELECT (см. caution в ответе execute_query при write-запросе).
 Ошибка конфига тестинга (нет port и т.п.) — в error от execute_query, prod не затрагивается.
 """.strip()
 
@@ -928,8 +973,10 @@ def _service_schema_description() -> str:
 
 def _testing_schema_description() -> str:
     return (
-        "Имя тестинга/стейджинга (my-env, test-alpha). "
-        "При указании подключение строится из .db-testing.yaml"
+        "Имя тестинга/стейджинга (my-env, test-alpha, s2). "
+        "При указании подключение строится из .db-testing.yaml. "
+        "Стейджинги (s2, s6, ...) резолвятся через staging_host_template, если он задан; "
+        "запись на стейджинг технически разрешена, но не рекомендуется без явной необходимости"
     )
 
 

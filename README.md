@@ -41,7 +41,8 @@ crm:
 ```yaml
 user: YOUR_TESTING_USER
 password: YOUR_TESTING_PASSWORD
-host_template: "{{env}}-example.com"   # example.com → реальный суффикс хоста БД тестинга
+host_template: "{{env}}-example.com"                    # example.com → реальный суффикс хоста БД тестинга
+staging_host_template: "yc-staging-{{env}}-db.skyeng.link"  # опционально, для стейджингов (s2, s6, ...)
 engines:                               # port и type обязательны; port — из инфраструктуры тестинга
   mysql8: { port: 0, type: mysql }
   pg11:   { port: 0, type: postgres }
@@ -54,6 +55,12 @@ services:
     engine: mysql8
     database: timetable
 ```
+
+Стейджинги (`s2`, `s6`, ...) используют тот же параметр `testing`, но резолвятся через
+`staging_host_template`, если он задан (иначе — через общий `host_template`). Запись на
+стейджинг технически не блокируется и не опасна для прод-пользователей, но напрямую менять
+данные там не рекомендуется без явной необходимости — `execute_query` возвращает поле
+`caution` при write-запросе на стейджинг.
 
 Пути по умолчанию: оба файла рядом с `mcp-db-server.py`. Переопределение:
 

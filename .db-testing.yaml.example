@@ -2,12 +2,19 @@
 # Параметр testing передаётся в MCP-инструменты (имя окружения).
 # host_template: {{env}} заменяется на значение testing; суффикс example.com
 #   замените на реальный адрес БД вашего тестинга (домен/хост после имени окружения).
+# staging_host_template (опционально): отдельный шаблон хоста для стейджингов
+#   (имена вида s2, s6, ...; регэксп ^s\d+$ в mcp-db-server.py). Если не задан —
+#   стейджинги резолвятся через общий host_template. Пример реального адреса:
+#   "yc-staging-{{env}}-db.skyeng.link" -> для testing="s2" даёт yc-staging-s2-db.skyeng.link.
+#   Запись на стейджинг технически разрешена (как и на любом testing) и не опасна для
+#   прод-пользователей, но напрямую менять данные там не рекомендуется без явной необходимости.
 # Имя БД на сервере по умолчанию: {service}_auto_{suffix}, suffix = testing без префикса test-
 # port и type в engines обязательны; подставьте port из инфраструктуры тестинга (в примере — 0)
 
 user: YOUR_TESTING_USER
 password: YOUR_TESTING_PASSWORD
 host_template: "{{env}}-example.com"
+staging_host_template: "yc-staging-{{env}}-db.skyeng.link"
 engines:
   pg11:   { port: 0, type: postgres }
   pg15:   { port: 0, type: postgres }

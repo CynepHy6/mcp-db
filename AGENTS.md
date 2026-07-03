@@ -32,7 +32,7 @@ mcp-db/
 | --- | --- |
 | MCP tools | `mcp-db-server.py` |
 | Prod-конфиг | `_load_prod_config`, `_normalize_prod_config_entry` |
-| Тестинг | `_load_testing_config`, `_resolve_testing_connection` |
+| Тестинг/стейджинг | `_load_testing_config`, `_resolve_testing_connection`, `_resolve_testing_host`, `_is_staging_env` |
 | Write gate | `_validate_query` — write если `testing` задан |
 
 ## Точки входа
@@ -46,8 +46,14 @@ mcp-db/
 - **MCP instructions:** `MCP_SERVER_INSTRUCTIONS` в `mcp-db-server.py` → `Server(instructions=...)` (видны агенту как serverUseInstructions)
 - **Prod:** `execute_query(service="crm", query="...")`
 - **Тестинг:** + `testing="..."`; конфиг из `.db-testing.yaml`
+- **Стейджинг:** тот же параметр `testing`, имена вида `s2`, `s6` (регэксп `STAGING_ENV_PATTERN` = `^s\d+$`).
+  Хост резолвится через `staging_host_template` из `.db-testing.yaml` (если задан), иначе через общий
+  `host_template`. Пример реального адреса: `yc-staging-{{env}}-db.skyeng.link` → для `s2` даёт
+  `yc-staging-s2-db.skyeng.link`. Запись на стейджинг технически разрешена и не опасна для прод-пользователей,
+  но не рекомендуется без явной необходимости — `execute_query` при write-запросе на стейджинг добавляет
+  в ответ поле `caution` (см. `_staging_write_caution`)
 - **SQL:** смотреть `db_type` / `sql_dialect_hint` в ответе `execute_query` или `get_database_info`; MySQL ≠ PostgreSQL синтаксис
-- `.db-testing.yaml` опционален (без него testing недоступен)
+- `.db-testing.yaml` опционален (без него testing/staging недоступны)
 - `_testing` в `.db.yaml` — ошибка, только отдельный файл
 - Не коммитить `.db.yaml`, `.db-testing.yaml`
 

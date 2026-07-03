@@ -303,3 +303,84 @@ def test_connection_summary_queries_postgres_unchanged(db_manager):
     assert "current_user as current_user" in info_query
     assert size_query == ""
     assert "information_schema.tables" in tables_query
+
+
+TESTING_CONFIG_WITH_STAGING = """
+user: test_user
+password: secret
+host_template: "{{env}}-local.example.test"
+staging_host_template: "yc-staging-{{env}}-db.example.test"
+engines:
+  mysql8: { port: 13306, type: mysql }
+  pg11:   { port: 15432, type: postgres }
+  pg15:   { port: 25432, type: postgres }
+  pg9:    { port: 35432, type: postgres }
+services:
+  crm: pg15
+  trm: pg11
+""".strip()
+
+
+@pytest.mark.parametrize(
+    ("testing", "expected"),
+    [
+        ("s2", True),
+        ("s16", True),
+        ("test-alpha", False),
+        ("test-y10", False),
+        ("my-env", False),
+        ("staging", False),
+    ],
+)
+def test_is_staging_env(testing, expected):
+    assert DatabaseManager._is_staging_env(testing) is expected
+
+
+def test_resolve_testing_host_uses_staging_host_template_for_staging_env(tmp_path):
+    manager = create_db_manager_with_config(tmp_path, PROD_CONFIG, TESTING_CONFIG_WITH_STAGING)
+
+    assert manager._resolve_testing_host("s2") == "yc-staging-s2-db.example.test"
+    assert manager._resolve_testing_host(TESTING_ALPHA) == "test-alpha-local.example.test"
+
+
+def test_resolve_testing_host_falls_back_without_staging_template(db_manager):
+    # db_manager fixture использует TESTING_CONFIG без staging_host_template
+    assert db_manager._resolve_testing_host("s2") == "s2-local.example.test"
+
+
+def test_normalize_testing_config_requires_staging_host_template_placeholder(tmp_path):
+    manager = create_db_manager_with_config(
+        tmp_path,
+        PROD_CONFIG,
+        """
+user: u
+password: p
+host_template: "{{env}}-local.example.test"
+staging_host_template: "fixed-staging-host.example.test"
+engines:
+  pg11: { port: 15432, type: postgres }
+services:
+  crm: pg11
+""",
+    )
+
+    assert manager.testing_config is None
+    assert "staging_host_template должен содержать" in manager.testing_config_error
+
+
+def test_staging_write_caution_present_for_write_query(tmp_path):
+    manager = create_db_manager_with_config(tmp_path, PROD_CONFIG, TESTING_CONFIG_WITH_STAGING)
+    result = manager.execute_query_direct("UPDATE crm SET x = 1", "crm", testing="s2")
+    assert result.get("caution") is not None
+    assert "не рекомендуется" in result["caution"]
+
+
+def test_staging_write_caution_absent_for_select_query(tmp_path):
+    manager = create_db_manager_with_config(tmp_path, PROD_CONFIG, TESTING_CONFIG_WITH_STAGING)
+    result = manager.execute_query_direct("SELECT 1", "crm", testing="s2")
+    assert "caution" not in result
+
+
+def test_staging_write_caution_absent_for_non_staging_testing(db_manager):
+    result = db_manager.execute_query_direct("UPDATE crm SET x = 1", "crm", testing=TESTING_ALPHA)
+    assert "caution" not in result
