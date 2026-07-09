@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import pytest
 import importlib.util
@@ -399,6 +400,76 @@ def test_staging_write_caution_absent_for_select_query(tmp_path):
 def test_staging_write_caution_absent_for_non_staging_testing(db_manager):
     result = db_manager.execute_query_direct("UPDATE crm SET x = 1", "crm", testing=TESTING_ALPHA)
     assert "caution" not in result
+
+
+def test_list_databases_caches_within_ttl(db_manager, monkeypatch):
+    calls = {"count": 0}
+    payload = {"prod_db": {"available": True}}
+
+    def fake_fresh(testing=None):
+        calls["count"] += 1
+        return copy.deepcopy(payload)
+
+    monkeypatch.setattr(db_manager, "_list_databases_fresh", fake_fresh)
+
+    first = db_manager.list_databases()
+    second = db_manager.list_databases()
+
+    assert first == payload
+    assert second == payload
+    assert calls["count"] == 1
+
+
+def test_list_databases_refetches_after_ttl(db_manager, monkeypatch):
+    calls = {"count": 0}
+    now = {"value": 1000.0}
+
+    def fake_fresh(testing=None):
+        calls["count"] += 1
+        return {"prod_db": {"available": True, "generation": calls["count"]}}
+
+    monkeypatch.setattr(db_manager, "LIST_DATABASES_TTL_SEC", 10)
+    monkeypatch.setattr(mcp_db_server.time, "monotonic", lambda: now["value"])
+    monkeypatch.setattr(db_manager, "_list_databases_fresh", fake_fresh)
+
+    first = db_manager.list_databases()
+    now["value"] += 11
+    second = db_manager.list_databases()
+
+    assert first["prod_db"]["generation"] == 1
+    assert second["prod_db"]["generation"] == 2
+    assert calls["count"] == 2
+
+
+def test_list_databases_cache_keys_separate_prod_and_testing(db_manager, monkeypatch):
+    calls = []
+
+    def fake_fresh(testing=None):
+        calls.append(testing)
+        return {"key": testing or "prod"}
+
+    monkeypatch.setattr(db_manager, "_list_databases_fresh", fake_fresh)
+
+    assert db_manager.list_databases()["key"] == "prod"
+    assert db_manager.list_databases(testing=TESTING_ALPHA)["key"] == TESTING_ALPHA
+    assert db_manager.list_databases()["key"] == "prod"
+    assert db_manager.list_databases(testing=TESTING_ALPHA)["key"] == TESTING_ALPHA
+    assert calls == [None, TESTING_ALPHA]
+
+
+def test_list_databases_cold_start_is_cache_miss(db_manager, monkeypatch):
+    calls = {"count": 0}
+
+    def fake_fresh(testing=None):
+        calls["count"] += 1
+        return {"prod_db": {"available": True}}
+
+    monkeypatch.setattr(db_manager, "_list_databases_fresh", fake_fresh)
+
+    assert db_manager._list_databases_cache == {}
+    db_manager.list_databases()
+    assert calls["count"] == 1
+    assert "prod" in db_manager._list_databases_cache
 
 
 def test_call_tool_runs_blocking_db_work_in_parallel(monkeypatch):

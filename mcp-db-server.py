@@ -4,11 +4,13 @@ MCP сервер для безопасной работы с базами дан
 Поддерживает все предметы платформы с локальным хранением кредов
 """
 
+import copy
 import json
 import logging
 import os
 import re
 import hashlib
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Any, Union, Tuple
@@ -86,6 +88,8 @@ class DatabaseManager:
     # Стейджинги именуются s2, s6, ... (без префикса test-); тестинги — test-yNN
     # или произвольные имена (test-alpha, my-env). См. .cursor/rules/glossary.mdc.
     STAGING_ENV_PATTERN = re.compile(r"^s\d+$")
+    # In-memory TTL для list_databases. Холодный старт процесса MCP = пустой кеш = живой fetch.
+    LIST_DATABASES_TTL_SEC = 10 * 60
 
     @staticmethod
     def _testing_port_missing_error(engine_name: str) -> str:
@@ -138,6 +142,8 @@ class DatabaseManager:
         self.testing_config: Optional[Dict[str, Any]] = None
         self.testing_config_error: Optional[str] = None
         self.schema_cache: Dict[str, Dict] = {}
+        self._list_databases_cache: Dict[str, Tuple[float, Dict[str, Dict]]] = {}
+        self._list_databases_cache_lock = threading.Lock()
         self.connect_timeout = int(os.getenv("MCP_DB_CONNECT_TIMEOUT", "2"))
         logger.info(f"Таймаут подключения к БД установлен: {self.connect_timeout} сек")
         self._load_db_config()
@@ -651,8 +657,27 @@ class DatabaseManager:
             }
             return (logical_key, entry)
 
-    def list_databases(self, testing: Optional[str] = None) -> Dict[str, Dict]:
-        """Возвращает список БД с информацией (параллельные подключения)."""
+    @staticmethod
+    def _list_databases_cache_key(testing: Optional[str] = None) -> str:
+        return f"testing:{testing}" if testing else "prod"
+
+    def _get_cached_list_databases(self, cache_key: str) -> Optional[Dict[str, Dict]]:
+        with self._list_databases_cache_lock:
+            cached = self._list_databases_cache.get(cache_key)
+            if cached is None:
+                return None
+            cached_at, payload = cached
+            if time.monotonic() - cached_at >= self.LIST_DATABASES_TTL_SEC:
+                del self._list_databases_cache[cache_key]
+                return None
+            return copy.deepcopy(payload)
+
+    def _set_cached_list_databases(self, cache_key: str, payload: Dict[str, Dict]) -> None:
+        with self._list_databases_cache_lock:
+            self._list_databases_cache[cache_key] = (time.monotonic(), copy.deepcopy(payload))
+
+    def _list_databases_fresh(self, testing: Optional[str] = None) -> Dict[str, Dict]:
+        """Живой обход подключений для list_databases (без кеша)."""
         if testing:
             self._ensure_testing_available()
 
@@ -687,6 +712,19 @@ class DatabaseManager:
 
         ordered_keys = [key for key, _ in targets]
         return {name: databases_info[name] for name in ordered_keys if name in databases_info}
+
+    def list_databases(self, testing: Optional[str] = None) -> Dict[str, Dict]:
+        """Возвращает список БД с информацией (кеш LIST_DATABASES_TTL_SEC, холодный старт = miss)."""
+        cache_key = self._list_databases_cache_key(testing)
+        cached = self._get_cached_list_databases(cache_key)
+        if cached is not None:
+            logger.info("list_databases cache hit key=%s", cache_key)
+            return cached
+
+        logger.info("list_databases cache miss key=%s", cache_key)
+        result = self._list_databases_fresh(testing)
+        self._set_cached_list_databases(cache_key, result)
+        return copy.deepcopy(result)
 
     def execute_query_direct(
         self,
@@ -1083,7 +1121,8 @@ async def list_tools() -> list[Tool]:
             name="list_databases",
             description=(
                 "Список БД и статус подключения. Без testing — prod-реплики из .db.yaml; "
-                "с testing — каталог services из .db-testing.yaml на указанном тестинге"
+                "с testing — каталог services из .db-testing.yaml на указанном тестинге. "
+                "Результат кешируется в процессе MCP на 10 минут; после рестарта сервера — живой fetch"
             ),
             inputSchema={
                 "type": "object",

@@ -95,6 +95,10 @@ venv/bin/python -m pytest test_mcp_db_server.py -q
 
 Опционально: `MCP_DB_CONNECT_TIMEOUT`, `MCP_DB_LIST_MAX_WORKERS`, `MCP_DB_MAX_CONCURRENT_TOOL_CALLS`.
 
+`list_databases` кеширует ответ in-memory на **10 минут** (`DatabaseManager.LIST_DATABASES_TTL_SEC`).
+Ключи кеша раздельные для prod и каждого `testing`. После рестарта MCP-процесса кеш пустой —
+первый вызов всегда делает живой обход подключений.
+
 ### Параллельные запросы
 
 Сервер работает как один локальный MCP `stdio`-процесс, который может обслуживать несколько

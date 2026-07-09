@@ -34,6 +34,7 @@ mcp-db/
 | Prod-конфиг | `_load_prod_config`, `_normalize_prod_config_entry` |
 | Тестинг/стейджинг | `_load_testing_config`, `_resolve_testing_connection`, `_resolve_testing_host`, `_is_staging_env` |
 | Write gate | `_validate_query` — write если `testing` задан |
+| Кеш списка БД | `list_databases` — in-memory TTL 10 мин (`LIST_DATABASES_TTL_SEC`); cold start = miss |
 
 ## Точки входа
 
