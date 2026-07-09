@@ -37,6 +37,48 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+DEFAULT_MAX_CONCURRENT_TOOL_CALLS = 2
+_tool_call_semaphore: Optional[asyncio.Semaphore] = None
+_tool_call_semaphore_loop: Optional[asyncio.AbstractEventLoop] = None
+_tool_call_semaphore_limit: Optional[int] = None
+
+
+def _get_max_concurrent_tool_calls() -> int:
+    raw_value = os.getenv("MCP_DB_MAX_CONCURRENT_TOOL_CALLS", str(DEFAULT_MAX_CONCURRENT_TOOL_CALLS))
+    try:
+        return max(1, int(raw_value))
+    except ValueError:
+        logger.warning(
+            "Некорректный MCP_DB_MAX_CONCURRENT_TOOL_CALLS=%r, использую %s",
+            raw_value,
+            DEFAULT_MAX_CONCURRENT_TOOL_CALLS,
+        )
+        return DEFAULT_MAX_CONCURRENT_TOOL_CALLS
+
+
+def _get_tool_call_semaphore() -> asyncio.Semaphore:
+    global _tool_call_semaphore, _tool_call_semaphore_loop, _tool_call_semaphore_limit
+
+    current_loop = asyncio.get_running_loop()
+    current_limit = _get_max_concurrent_tool_calls()
+
+    if (
+        _tool_call_semaphore is None
+        or _tool_call_semaphore_loop is not current_loop
+        or _tool_call_semaphore_limit != current_limit
+    ):
+        _tool_call_semaphore = asyncio.Semaphore(current_limit)
+        _tool_call_semaphore_loop = current_loop
+        _tool_call_semaphore_limit = current_limit
+
+    return _tool_call_semaphore
+
+
+async def _run_db_tool_call(func, *args):
+    # DB-драйверы синхронные; без выноса в thread они блокируют общий MCP event loop.
+    async with _get_tool_call_semaphore():
+        return await asyncio.to_thread(func, *args)
+
 class DatabaseManager:
     """Менеджер для работы с базами данных предметов"""
 
@@ -1093,7 +1135,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     text="Ошибка: необходимо указать query и service"
                 )]
 
-            result = db_manager.execute_query_direct(query, service, testing)
+            result = await _run_db_tool_call(
+                db_manager.execute_query_direct,
+                query,
+                service,
+                testing,
+            )
             return [TextContent(
                 type="text",
                 text=json.dumps(result, ensure_ascii=False, indent=2, default=str)
@@ -1110,7 +1157,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     text="Ошибка: необходимо указать service"
                 )]
 
-            result = db_manager.get_tables_schemas_direct(service, testing, table_names)
+            result = await _run_db_tool_call(
+                db_manager.get_tables_schemas_direct,
+                service,
+                testing,
+                table_names,
+            )
             return [TextContent(
                 type="text",
                 text=json.dumps(result, ensure_ascii=False, indent=2, default=str)
@@ -1118,7 +1170,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         elif name == "list_databases":
             testing = arguments.get("testing")
-            result = db_manager.list_databases(testing)
+            result = await _run_db_tool_call(db_manager.list_databases, testing)
             return [TextContent(
                 type="text",
                 text=json.dumps(result, ensure_ascii=False, indent=2, default=str)
@@ -1134,7 +1186,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     text="Ошибка: необходимо указать service"
                 )]
 
-            result = db_manager.get_database_info_direct(service, testing)
+            result = await _run_db_tool_call(
+                db_manager.get_database_info_direct,
+                service,
+                testing,
+            )
             return [TextContent(
                 type="text",
                 text=json.dumps(result, ensure_ascii=False, indent=2, default=str)
@@ -1172,6 +1228,7 @@ def show_help():
     print("  .db-testing.yaml — тестинги (рядом с .db.yaml)")
     print("  MCP_DB_CONFIG=/path/to/.db.yaml — prod-конфиг")
     print("  MCP_DB_TESTING_CONFIG=/path/to/.db-testing.yaml — тестинг-конфиг")
+    print("  MCP_DB_MAX_CONCURRENT_TOOL_CALLS=2 — лимит одновременных DB tool calls")
 
 async def main():
     """Запуск MCP сервера"""

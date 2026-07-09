@@ -1,6 +1,10 @@
+import asyncio
+import json
 import pytest
 import importlib.util
 import sys
+import threading
+import time
 
 # Фиктивные хосты для тестов конфигурации (не prod/test инфраструктура).
 MYSQL_REPL_HOST = "mysql-example-repl.example.test"
@@ -58,6 +62,17 @@ def create_db_manager_with_config(tmp_path, prod_text=None, testing_text=None):
         config_path=str(config_path),
         testing_config_path=str(testing_config_path),
     )
+
+
+@pytest.fixture(autouse=True)
+def reset_tool_call_semaphore(monkeypatch):
+    monkeypatch.setattr(mcp_db_server, "_tool_call_semaphore", None)
+    monkeypatch.setattr(mcp_db_server, "_tool_call_semaphore_loop", None)
+    monkeypatch.setattr(mcp_db_server, "_tool_call_semaphore_limit", None)
+
+
+def _tool_result_payload(result):
+    return json.loads(result[0].text)
 
 
 def test_validate_query_allows_complex_select(db_manager):
@@ -384,3 +399,70 @@ def test_staging_write_caution_absent_for_select_query(tmp_path):
 def test_staging_write_caution_absent_for_non_staging_testing(db_manager):
     result = db_manager.execute_query_direct("UPDATE crm SET x = 1", "crm", testing=TESTING_ALPHA)
     assert "caution" not in result
+
+
+def test_call_tool_runs_blocking_db_work_in_parallel(monkeypatch):
+    barrier = threading.Barrier(2, timeout=1.0)
+    state_lock = threading.Lock()
+    active_calls = 0
+    max_active_calls = 0
+
+    def fake_execute_query(query, service, testing=None):
+        nonlocal active_calls, max_active_calls
+        with state_lock:
+            active_calls += 1
+            max_active_calls = max(max_active_calls, active_calls)
+
+        try:
+            barrier.wait()
+            return {"success": True, "query": query}
+        finally:
+            with state_lock:
+                active_calls -= 1
+
+    monkeypatch.setenv("MCP_DB_MAX_CONCURRENT_TOOL_CALLS", "2")
+    monkeypatch.setattr(mcp_db_server.db_manager, "execute_query_direct", fake_execute_query)
+
+    async def run_calls():
+        return await asyncio.gather(
+            mcp_db_server.call_tool("execute_query", {"query": "SELECT 1", "service": "crm"}),
+            mcp_db_server.call_tool("execute_query", {"query": "SELECT 2", "service": "crm"}),
+        )
+
+    results = asyncio.run(run_calls())
+
+    assert [_tool_result_payload(result)["query"] for result in results] == ["SELECT 1", "SELECT 2"]
+    assert max_active_calls == 2
+
+
+def test_call_tool_respects_global_concurrency_limit(monkeypatch):
+    state_lock = threading.Lock()
+    active_calls = 0
+    max_active_calls = 0
+
+    def fake_execute_query(query, service, testing=None):
+        nonlocal active_calls, max_active_calls
+        with state_lock:
+            active_calls += 1
+            max_active_calls = max(max_active_calls, active_calls)
+
+        try:
+            time.sleep(0.05)
+            return {"success": True, "query": query}
+        finally:
+            with state_lock:
+                active_calls -= 1
+
+    monkeypatch.setenv("MCP_DB_MAX_CONCURRENT_TOOL_CALLS", "1")
+    monkeypatch.setattr(mcp_db_server.db_manager, "execute_query_direct", fake_execute_query)
+
+    async def run_calls():
+        return await asyncio.gather(
+            mcp_db_server.call_tool("execute_query", {"query": "SELECT 1", "service": "crm"}),
+            mcp_db_server.call_tool("execute_query", {"query": "SELECT 2", "service": "crm"}),
+        )
+
+    results = asyncio.run(run_calls())
+
+    assert [_tool_result_payload(result)["query"] for result in results] == ["SELECT 1", "SELECT 2"]
+    assert max_active_calls == 1

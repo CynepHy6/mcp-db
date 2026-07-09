@@ -93,7 +93,19 @@ services:
 venv/bin/python -m pytest test_mcp_db_server.py -q
 ```
 
-Опционально: `MCP_DB_CONNECT_TIMEOUT`, `MCP_DB_LIST_MAX_WORKERS`.
+Опционально: `MCP_DB_CONNECT_TIMEOUT`, `MCP_DB_LIST_MAX_WORKERS`, `MCP_DB_MAX_CONCURRENT_TOOL_CALLS`.
+
+### Параллельные запросы
+
+Сервер работает как один локальный MCP `stdio`-процесс, который может обслуживать несколько
+чатов одновременно. DB-драйверы синхронные, поэтому tool calls выполняются через thread offload
+и ограничиваются семафором.
+
+- `MCP_DB_MAX_CONCURRENT_TOOL_CALLS` — лимит одновременных DB tool calls, по умолчанию `2`
+- `MCP_DB_LIST_MAX_WORKERS` — внутренний fan-out для `list_databases`
+
+Если при одновременной работе из нескольких чатов сервер начинает упираться в таймауты или
+создавать слишком много соединений, обычно безопасно сначала уменьшить один из этих лимитов.
 
 ## Безопасность
 
