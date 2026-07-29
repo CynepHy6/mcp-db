@@ -40,9 +40,39 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_CONCURRENT_TOOL_CALLS = 2
+# Лимит на выполнение SQL: агенты часто шлют неоптимизированные запросы без LIMIT.
+DEFAULT_QUERY_TIMEOUT_SEC = 30
 _tool_call_semaphore: Optional[asyncio.Semaphore] = None
 _tool_call_semaphore_loop: Optional[asyncio.AbstractEventLoop] = None
 _tool_call_semaphore_limit: Optional[int] = None
+
+
+def _get_default_query_timeout_sec() -> int:
+    raw_value = os.getenv("MCP_DB_QUERY_TIMEOUT", str(DEFAULT_QUERY_TIMEOUT_SEC))
+    try:
+        return max(0, int(raw_value))
+    except ValueError:
+        logger.warning(
+            "Некорректный MCP_DB_QUERY_TIMEOUT=%r, использую %s",
+            raw_value,
+            DEFAULT_QUERY_TIMEOUT_SEC,
+        )
+        return DEFAULT_QUERY_TIMEOUT_SEC
+
+
+def _normalize_query_timeout_sec(timeout: Optional[Union[int, float, str]]) -> int:
+    """Секунды лимита SQL; None → дефолт; 0 → без лимита."""
+    if timeout is None:
+        return _get_default_query_timeout_sec()
+    try:
+        value = int(timeout)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Параметр timeout должен быть целым числом секунд (0 = без лимита), получено: {timeout!r}"
+        ) from exc
+    if value < 0:
+        raise ValueError("Параметр timeout не может быть отрицательным")
+    return value
 
 
 def _get_max_concurrent_tool_calls() -> int:
@@ -145,7 +175,12 @@ class DatabaseManager:
         self._list_databases_cache: Dict[str, Tuple[float, Dict[str, Dict]]] = {}
         self._list_databases_cache_lock = threading.Lock()
         self.connect_timeout = int(os.getenv("MCP_DB_CONNECT_TIMEOUT", "2"))
+        self.query_timeout_sec = _get_default_query_timeout_sec()
         logger.info(f"Таймаут подключения к БД установлен: {self.connect_timeout} сек")
+        logger.info(
+            "Таймаут выполнения SQL по умолчанию: %s сек (0 = без лимита; параметр timeout / MCP_DB_QUERY_TIMEOUT)",
+            self.query_timeout_sec,
+        )
         self._load_db_config()
 
     def _load_db_config(self):
@@ -495,21 +530,32 @@ class DatabaseManager:
             "но не рекомендуется без явной необходимости — предпочитай SELECT."
         )
 
-    def _get_connection(self, logical_key: str, conn_config: Dict[str, Any]):
+    def _get_connection(
+        self,
+        logical_key: str,
+        conn_config: Dict[str, Any],
+        query_timeout_sec: Optional[int] = None,
+    ):
         """Получает подключение к БД по нормализованному конфигу."""
         db_type = conn_config.get("db_type", "postgres")
 
         try:
             if db_type == "mysql":
-                conn = pymysql.connect(
-                    host=conn_config["host"],
-                    port=int(conn_config["port"]),
-                    user=conn_config["user"],
-                    password=conn_config["password"],
-                    database=conn_config["database"],
-                    connect_timeout=self.connect_timeout,
-                    cursorclass=pymysql.cursors.DictCursor,
-                )
+                mysql_kwargs: Dict[str, Any] = {
+                    "host": conn_config["host"],
+                    "port": int(conn_config["port"]),
+                    "user": conn_config["user"],
+                    "password": conn_config["password"],
+                    "database": conn_config["database"],
+                    "connect_timeout": self.connect_timeout,
+                    "cursorclass": pymysql.cursors.DictCursor,
+                }
+                # Клиентский лимит чтения/записи — страховка, если MAX_EXECUTION_TIME не сработает
+                # (не-SELECT) или сервер его не поддерживает.
+                if query_timeout_sec and query_timeout_sec > 0:
+                    mysql_kwargs["read_timeout"] = query_timeout_sec
+                    mysql_kwargs["write_timeout"] = query_timeout_sec
+                conn = pymysql.connect(**mysql_kwargs)
             else:
                 conn = psycopg2.connect(
                     host=conn_config["host"],
@@ -523,6 +569,18 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Ошибка подключения к БД {logical_key}: {e}")
             raise
+
+    def _apply_query_timeout(self, conn, db_type: str, timeout_sec: int) -> None:
+        """Серверный лимит на текущую сессию: Postgres statement_timeout, MySQL MAX_EXECUTION_TIME."""
+        if timeout_sec <= 0:
+            return
+        timeout_ms = int(timeout_sec) * 1000
+        with self._cursor(conn, db_type) as cur:
+            if db_type == "mysql":
+                # Только SELECT; для остального срабатывает read_timeout на connect.
+                cur.execute("SET SESSION MAX_EXECUTION_TIME = %s", (timeout_ms,))
+            else:
+                cur.execute("SET statement_timeout = %s", (timeout_ms,))
 
     def _cursor(self, conn, db_type: str):
         """Возвращает cursor context manager с dict-like строками."""
@@ -731,6 +789,7 @@ class DatabaseManager:
         query: str,
         service: str,
         testing: Optional[str] = None,
+        timeout: Optional[Union[int, float, str]] = None,
     ) -> Dict[str, Any]:
         """Выполняет SQL запрос к БД напрямую."""
         if not self._validate_query(query, testing):
@@ -738,7 +797,7 @@ class DatabaseManager:
 
         start_time = time.time()
         try:
-            logical_key, conn_config = self._resolve_target(service, testing)
+            timeout_sec = _normalize_query_timeout_sec(timeout)
         except ValueError as e:
             return {
                 "success": False,
@@ -748,12 +807,29 @@ class DatabaseManager:
                 "execution_time": 0,
             }
 
+        try:
+            logical_key, conn_config = self._resolve_target(service, testing)
+        except ValueError as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "service": service,
+                "testing": testing,
+                "execution_time": 0,
+                "timeout_sec": timeout_sec,
+            }
+
         query_context = self._query_response_context(conn_config)
         db_type = conn_config.get("db_type", "postgres")
         caution = self._staging_write_caution(testing, query)
 
         try:
-            with self._get_connection(logical_key, conn_config) as conn:
+            with self._get_connection(
+                logical_key,
+                conn_config,
+                query_timeout_sec=timeout_sec,
+            ) as conn:
+                self._apply_query_timeout(conn, db_type, timeout_sec)
                 with self._cursor(conn, db_type) as cur:
                     cur.execute(query)
 
@@ -775,6 +851,7 @@ class DatabaseManager:
                         "data": results,
                         "rows_count": len(results),
                         "execution_time": execution_time,
+                        "timeout_sec": timeout_sec,
                         "service": service,
                         "testing": testing,
                         "database": conn_config["database"],
@@ -786,17 +863,39 @@ class DatabaseManager:
 
         except Exception as e:
             logger.error(f"Ошибка выполнения запроса к БД {logical_key}: {e}")
+            error_msg = str(e)
+            if timeout_sec > 0 and self._is_query_timeout_error(error_msg):
+                error_msg = (
+                    f"Запрос превысил лимит {timeout_sec}с и был прерван. "
+                    f"Сократи SQL (индексы, WHERE, LIMIT) или передай timeout больше {timeout_sec}. "
+                    f"Исходная ошибка: {e}"
+                )
             error_response = {
                 "success": False,
-                "error": str(e),
+                "error": error_msg,
                 "service": service,
                 "testing": testing,
                 "execution_time": time.time() - start_time,
+                "timeout_sec": timeout_sec,
                 **query_context,
             }
             if caution:
                 error_response["caution"] = caution
             return error_response
+
+    @staticmethod
+    def _is_query_timeout_error(error_msg: str) -> bool:
+        lowered = error_msg.lower()
+        markers = (
+            "statement timeout",
+            "canceling statement due to statement timeout",
+            "max_execution_time",
+            "maximum statement execution time exceeded",
+            "timed out",
+            "timeout",
+            "lost connection",
+        )
+        return any(marker in lowered for marker in markers)
 
 
     def get_database_info_direct(
@@ -1022,6 +1121,8 @@ MCP user-DB: prod-реплики и тестинги Skyeng Platform.
 Параметры:
 - service — имя сервиса/БД (crm, timetable, learning_groups_storage, …)
 - testing — имя окружения для тестинга (my-env, test-alpha, …); без testing = prod (read-only)
+- timeout — лимит выполнения SQL в секундах (по умолчанию 30; 0 = без лимита). При timeout
+  оптимизируй запрос (WHERE/LIMIT/индексы), не поднимай лимит без нужды.
 
 Перед первым SQL к незнакомому service вызови get_database_info или list_databases и смотри connection_config.db_type.
 SQL пиши в синтаксисе db_type из ответа; execute_query тоже возвращает db_type и sql_dialect_hint.
@@ -1068,9 +1169,10 @@ async def list_tools() -> list[Tool]:
             name="execute_query",
             description=(
                 "Выполнить SQL к service [, testing]. Prod — read-only; testing — любые SQL. "
+                "По умолчанию лимит выполнения 30с (параметр timeout; 0 = без лимита). "
                 "Ответ содержит db_type и sql_dialect_hint — используй их для синтаксиса. "
                 "При syntax error пересобери запрос под db_type; для mysql не используй "
-                "postgres-алиасы без обратных кавычек"
+                "postgres-алиасы без обратных кавычек. При timeout — сузь SQL, не поднимай лимит зря"
             ),
             inputSchema={
                 "type": "object",
@@ -1089,6 +1191,15 @@ async def list_tools() -> list[Tool]:
                     "testing": {
                         "type": "string",
                         "description": _testing_schema_description()
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": (
+                            "Лимит выполнения SQL в секундах. По умолчанию 30. "
+                            "0 — без лимита. При превышении запрос прерывается; "
+                            "сначала оптимизируй SQL (WHERE, LIMIT), потом увеличивай timeout"
+                        )
                     }
                 },
                 "required": ["query", "service"]
@@ -1167,6 +1278,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             query = arguments.get("query")
             service = arguments.get("service")
             testing = arguments.get("testing")
+            timeout = arguments.get("timeout")
 
             if not query or not service:
                 return [TextContent(
@@ -1179,6 +1291,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 query,
                 service,
                 testing,
+                timeout,
             )
             return [TextContent(
                 type="text",

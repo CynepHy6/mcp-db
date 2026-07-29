@@ -71,16 +71,20 @@ services:
 
 | Инструмент | Prod | Тестинг |
 |---|---|---|
-| `execute_query` | `service`, `query` | + `testing` |
+| `execute_query` | `service`, `query` [, `timeout`] | + `testing` |
 | `get_tables_schemas` | `service` | + `testing` |
 | `get_database_info` | `service` | + `testing` |
 | `list_databases` | без параметров | `testing` |
+
+`timeout` — лимит выполнения SQL в секундах (по умолчанию **30**, `0` = без лимита).
+Дефолт процесса можно задать через `MCP_DB_QUERY_TIMEOUT`.
 
 ```json
 {
   "service": "crm",
   "testing": "my-env",
-  "query": "SELECT 1"
+  "query": "SELECT 1",
+  "timeout": 30
 }
 ```
 
@@ -93,7 +97,7 @@ services:
 venv/bin/python -m pytest test_mcp_db_server.py -q
 ```
 
-Опционально: `MCP_DB_CONNECT_TIMEOUT`, `MCP_DB_LIST_MAX_WORKERS`, `MCP_DB_MAX_CONCURRENT_TOOL_CALLS`.
+Опционально: `MCP_DB_CONNECT_TIMEOUT`, `MCP_DB_QUERY_TIMEOUT`, `MCP_DB_LIST_MAX_WORKERS`, `MCP_DB_MAX_CONCURRENT_TOOL_CALLS`.
 
 `list_databases` кеширует ответ in-memory на **10 минут** (`DatabaseManager.LIST_DATABASES_TTL_SEC`).
 Ключи кеша раздельные для prod и каждого `testing`. После рестарта MCP-процесса кеш пустой —

@@ -47,6 +47,7 @@ mcp-db/
 - **MCP instructions:** `MCP_SERVER_INSTRUCTIONS` в `mcp-db-server.py` → `Server(instructions=...)` (видны агенту как serverUseInstructions)
 - **Prod:** `execute_query(service="crm", query="...")`
 - **Тестинг:** + `testing="..."`; конфиг из `.db-testing.yaml`
+- **timeout SQL:** по умолчанию 30с (`DEFAULT_QUERY_TIMEOUT_SEC` / `MCP_DB_QUERY_TIMEOUT`); параметр `timeout` в `execute_query` (секунды; `0` = без лимита). Postgres — `statement_timeout`, MySQL — `MAX_EXECUTION_TIME` + `read_timeout`/`write_timeout` на connect
 - **Стейджинг:** тот же параметр `testing`, имена вида `s2`, `s6` (регэксп `STAGING_ENV_PATTERN` = `^s\d+$`).
   Хост резолвится через `staging_host_template` из `.db-testing.yaml` (если задан), иначе через общий
   `host_template`. Пример реального адреса: `yc-staging-{{env}}-db.skyeng.link` → для `s2` даёт

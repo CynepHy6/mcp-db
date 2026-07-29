@@ -302,9 +302,122 @@ def test_execute_query_response_includes_db_type_hint(db_manager):
     if result["success"]:
         assert result["db_type"] == "postgres"
         assert "PostgreSQL" in result["sql_dialect_hint"]
+        assert result["timeout_sec"] == mcp_db_server.DEFAULT_QUERY_TIMEOUT_SEC
     elif "не указан port" not in result.get("error", ""):
         assert result.get("db_type") == "postgres"
         assert "PostgreSQL" in result.get("sql_dialect_hint", "")
+
+
+def test_normalize_query_timeout_default_and_override(monkeypatch):
+    monkeypatch.delenv("MCP_DB_QUERY_TIMEOUT", raising=False)
+    assert mcp_db_server._normalize_query_timeout_sec(None) == 30
+    assert mcp_db_server._normalize_query_timeout_sec(120) == 120
+    assert mcp_db_server._normalize_query_timeout_sec(0) == 0
+    assert mcp_db_server._normalize_query_timeout_sec("45") == 45
+
+    with pytest.raises(ValueError, match="отрицательным"):
+        mcp_db_server._normalize_query_timeout_sec(-1)
+    with pytest.raises(ValueError, match="целым числом"):
+        mcp_db_server._normalize_query_timeout_sec("slow")
+
+
+def test_normalize_query_timeout_respects_env(monkeypatch):
+    monkeypatch.setenv("MCP_DB_QUERY_TIMEOUT", "90")
+    assert mcp_db_server._normalize_query_timeout_sec(None) == 90
+
+
+def test_apply_query_timeout_sets_server_limits(db_manager, monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def execute(self, sql, params=None):
+            executed.append((sql, params))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(db_manager, "_cursor", lambda conn, db_type: FakeCursor())
+
+    db_manager._apply_query_timeout(object(), "postgres", 30)
+    assert executed == [("SET statement_timeout = %s", (30000,))]
+
+    executed.clear()
+    db_manager._apply_query_timeout(object(), "mysql", 15)
+    assert executed == [("SET SESSION MAX_EXECUTION_TIME = %s", (15000,))]
+
+    executed.clear()
+    db_manager._apply_query_timeout(object(), "postgres", 0)
+    assert executed == []
+
+
+def test_execute_query_invalid_timeout_returns_error(db_manager):
+    result = db_manager.execute_query_direct(
+        "SELECT 1",
+        "crm",
+        testing=TESTING_ALPHA,
+        timeout=-5,
+    )
+    assert result["success"] is False
+    assert "отрицательным" in result["error"]
+
+
+def test_execute_query_passes_timeout_to_connection(db_manager, monkeypatch):
+    captured = {}
+
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class FakeCursor:
+        def execute(self, sql, params=None):
+            pass
+
+        def fetchall(self):
+            return []
+
+        @property
+        def description(self):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_get_connection(logical_key, conn_config, query_timeout_sec=None):
+        captured["query_timeout_sec"] = query_timeout_sec
+        return FakeConn()
+
+    monkeypatch.setattr(db_manager, "_get_connection", fake_get_connection)
+    monkeypatch.setattr(db_manager, "_cursor", lambda conn, db_type: FakeCursor())
+    monkeypatch.setattr(db_manager, "_apply_query_timeout", lambda *args, **kwargs: None)
+
+    result = db_manager.execute_query_direct(
+        "SELECT 1",
+        "crm",
+        testing=TESTING_ALPHA,
+        timeout=60,
+    )
+    assert result["success"] is True
+    assert result["timeout_sec"] == 60
+    assert captured["query_timeout_sec"] == 60
+
+
+def test_is_query_timeout_error():
+    assert DatabaseManager._is_query_timeout_error(
+        "canceling statement due to statement timeout"
+    )
+    assert DatabaseManager._is_query_timeout_error(
+        "Query execution was interrupted, maximum statement execution time exceeded"
+    )
+    assert not DatabaseManager._is_query_timeout_error("syntax error at or near")
 
 
 def test_sql_dialect_hint_for_mysql(db_manager):
@@ -478,7 +591,7 @@ def test_call_tool_runs_blocking_db_work_in_parallel(monkeypatch):
     active_calls = 0
     max_active_calls = 0
 
-    def fake_execute_query(query, service, testing=None):
+    def fake_execute_query(query, service, testing=None, timeout=None):
         nonlocal active_calls, max_active_calls
         with state_lock:
             active_calls += 1
@@ -511,7 +624,7 @@ def test_call_tool_respects_global_concurrency_limit(monkeypatch):
     active_calls = 0
     max_active_calls = 0
 
-    def fake_execute_query(query, service, testing=None):
+    def fake_execute_query(query, service, testing=None, timeout=None):
         nonlocal active_calls, max_active_calls
         with state_lock:
             active_calls += 1
