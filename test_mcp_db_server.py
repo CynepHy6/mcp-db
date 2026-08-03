@@ -457,12 +457,44 @@ services:
         ("s16", True),
         ("test-alpha", False),
         ("test-y10", False),
+        ("y10", False),
         ("my-env", False),
         ("staging", False),
     ],
 )
 def test_is_staging_env(testing, expected):
     assert DatabaseManager._is_staging_env(testing) is expected
+
+
+@pytest.mark.parametrize(
+    ("testing", "expected"),
+    [
+        ("y10", "test-y10"),
+        ("y148", "test-y148"),
+        ("test-y10", "test-y10"),
+        ("test-alpha", "test-alpha"),
+        ("my-env", "my-env"),
+        ("s2", "s2"),
+    ],
+)
+def test_normalize_testing_env(testing, expected):
+    assert DatabaseManager._normalize_testing_env(testing) == expected
+
+
+def test_resolve_testing_host_maps_qa_panel_short_name_to_test_prefix(db_manager):
+    assert db_manager._resolve_testing_host("y10") == "test-y10-local.example.test"
+    assert db_manager._resolve_testing_host("test-y10") == "test-y10-local.example.test"
+
+
+def test_resolve_testing_connection_maps_qa_panel_short_name(db_manager):
+    conn = db_manager._resolve_testing_connection("y10", "crm")
+    assert conn["testing"] == "test-y10"
+    assert conn["host"] == "test-y10-local.example.test"
+    assert conn["database"] == "crm_auto_y10"
+
+    key, resolved = db_manager._resolve_target("crm", "y10")
+    assert key == "crm@test-y10"
+    assert resolved["testing"] == "test-y10"
 
 
 def test_resolve_testing_host_uses_staging_host_template_for_staging_env(tmp_path):

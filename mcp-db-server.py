@@ -118,6 +118,8 @@ class DatabaseManager:
     # Стейджинги именуются s2, s6, ... (без префикса test-); тестинги — test-yNN
     # или произвольные имена (test-alpha, my-env). См. .cursor/rules/glossary.mdc.
     STAGING_ENV_PATTERN = re.compile(r"^s\d+$")
+    # qa-panel shortName персональных стендов (y10, y148) — алиас для test-yNN.
+    PERSONAL_TESTING_SHORT_PATTERN = re.compile(r"^y\d+$")
     # In-memory TTL для list_databases. Холодный старт процесса MCP = пустой кеш = живой fetch.
     LIST_DATABASES_TTL_SEC = 10 * 60
 
@@ -416,6 +418,13 @@ class DatabaseManager:
 
         return port, db_type
 
+    @classmethod
+    def _normalize_testing_env(cls, testing: str) -> str:
+        """qa-panel shortName yNN → test-yNN; host_template ожидает полное имя стенда."""
+        if cls.PERSONAL_TESTING_SHORT_PATTERN.match(testing):
+            return f"test-{testing}"
+        return testing
+
     @staticmethod
     def _testing_env_suffix(testing: str) -> str:
         """test-alpha -> alpha; без префикса test- суффикс совпадает с testing."""
@@ -430,6 +439,7 @@ class DatabaseManager:
 
     def _resolve_testing_host(self, testing: str) -> str:
         self._ensure_testing_available()
+        testing = self._normalize_testing_env(testing)
         staging_host_template = self.testing_config.get("staging_host_template")
         if staging_host_template and self._is_staging_env(testing):
             template = staging_host_template
@@ -440,6 +450,7 @@ class DatabaseManager:
     def _resolve_testing_connection(self, testing: str, service: str) -> Dict[str, Any]:
         """Собирает параметры подключения к БД на тестинге."""
         self._ensure_testing_available()
+        testing = self._normalize_testing_env(testing)
 
         service_info = self.testing_config["services"].get(service)
         if not service_info:
@@ -473,6 +484,7 @@ class DatabaseManager:
     ) -> Tuple[str, Dict[str, Any]]:
         """Возвращает (логический_ключ, конфиг_подключения) для prod или тестинга."""
         if testing:
+            testing = self._normalize_testing_env(testing)
             conn = self._resolve_testing_connection(testing, service)
             return f"{service}@{testing}", conn
 
@@ -737,6 +749,7 @@ class DatabaseManager:
     def _list_databases_fresh(self, testing: Optional[str] = None) -> Dict[str, Dict]:
         """Живой обход подключений для list_databases (без кеша)."""
         if testing:
+            testing = self._normalize_testing_env(testing)
             self._ensure_testing_available()
 
             targets = [
@@ -773,6 +786,8 @@ class DatabaseManager:
 
     def list_databases(self, testing: Optional[str] = None) -> Dict[str, Dict]:
         """Возвращает список БД с информацией (кеш LIST_DATABASES_TTL_SEC, холодный старт = miss)."""
+        if testing:
+            testing = self._normalize_testing_env(testing)
         cache_key = self._list_databases_cache_key(testing)
         cached = self._get_cached_list_databases(cache_key)
         if cached is not None:
@@ -1120,7 +1135,8 @@ MCP user-DB: prod-реплики и тестинги Skyeng Platform.
 
 Параметры:
 - service — имя сервиса/БД (crm, timetable, learning_groups_storage, …)
-- testing — имя окружения для тестинга (my-env, test-alpha, …); без testing = prod (read-only)
+- testing — имя окружения для тестинга (test-y10, test-alpha, my-env, …);
+  shortName qa-panel yNN (y10) принимается как алиас test-yNN; без testing = prod (read-only)
 - timeout — лимит выполнения SQL в секундах (по умолчанию 30; 0 = без лимита). При timeout
   оптимизируй запрос (WHERE/LIMIT/индексы), не поднимай лимит без нужды.
 
@@ -1154,7 +1170,8 @@ def _service_schema_description() -> str:
 
 def _testing_schema_description() -> str:
     return (
-        "Имя тестинга/стейджинга (my-env, test-alpha, s2). "
+        "Имя тестинга/стейджинга (test-y10, test-alpha, my-env, s2). "
+        "qa-panel shortName yNN (y10) — алиас для test-yNN. "
         "При указании подключение строится из .db-testing.yaml. "
         "Стейджинги (s2, s6, ...) резолвятся через staging_host_template, если он задан; "
         "запись на стейджинг технически разрешена, но не рекомендуется без явной необходимости"
