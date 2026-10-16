@@ -1,0 +1,115 @@
+name: Publish dist branch
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - "src/**"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig*.json"
+      - ".github/workflows/publish-dist.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish-dist:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Read package version
+        id: pkg
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Skip publish if version already released
+        id: gate
+        run: |
+          TAG="v${{ steps.pkg.outputs.version }}"
+          if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q "refs/tags/${TAG}"; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${TAG} already released — running tests only, skipping publish."
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Test
+        run: npm test
+
+      - name: Compile
+        if: steps.gate.outputs.release == 'true'
+        run: npm run compile
+
+      - name: Publish to dist branch and tag release
+        if: steps.gate.outputs.release == 'true'
+        env:
+          DIST_DIR: ${{ runner.temp }}/mcp-db-dist
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          TAG="v${VERSION}"
+          REMOTE="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          rm -rf "$DIST_DIR"
+          mkdir -p "$DIST_DIR/build"
+          cp LICENSE "$DIST_DIR/"
+          cp -r build/. "$DIST_DIR/build/"
+
+          node <<'NODE'
+          const fs = require("fs");
+          const path = process.env.DIST_DIR;
+          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+
+          // npx + github: breaks when package.json has a "build" script (npm/cli#4003).
+          // dist ships precompiled build/ — runtime-only manifest, no devDeps, no compile scripts.
+          const distPkg = {
+            name: pkg.name,
+            version: pkg.version,
+            description: pkg.description,
+            repository: pkg.repository,
+            bugs: pkg.bugs,
+            homepage: pkg.homepage,
+            main: pkg.main,
+            type: pkg.type,
+            bin: pkg.bin,
+            scripts: { start: pkg.scripts.start },
+            files: pkg.files,
+            keywords: pkg.keywords,
+            author: pkg.author,
+            license: pkg.license,
+            engines: pkg.engines,
+            dependencies: pkg.dependencies,
+          };
+
+          fs.writeFileSync(
+            `${path}/package.json`,
+            `${JSON.stringify(distPkg, null, 4)}\n`,
+          );
+          NODE
+
+          cd "$DIST_DIR"
+          git init
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b dist
+          git add .
+          git commit -m "Release ${TAG} from ${GITHUB_SHA}"
+          git tag -a "${TAG}" -m "Release ${TAG} from master ${GITHUB_SHA}"
+
+          git push --force "$REMOTE" dist:dist
+          git push --force "$REMOTE" "refs/tags/${TAG}"

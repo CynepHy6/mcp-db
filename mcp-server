@@ -1,9 +1,12 @@
 #!/bin/bash
+# Local-clone launcher kept for MCP configs that point at this file.
+# Needs `npm install && npm run compile` once; with npx use github:CynepHy6/mcp-db instead.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# cwd = каталог инструмента, чтобы относительный mcp-db-server.log писался сюда,
-# а не в рабочий каталог клиента (Claude Code держит cwd на корне воркспейса).
-cd "$SCRIPT_DIR"
+if [ ! -f "$SCRIPT_DIR/build/index.js" ]; then
+    echo "mcp-db: build/index.js not found — run 'npm install && npm run compile' in $SCRIPT_DIR" >&2
+    exit 1
+fi
 
-exec "$SCRIPT_DIR/venv/bin/python" "$SCRIPT_DIR/mcp-db-server.py" "$@"
+exec node "$SCRIPT_DIR/build/index.js" "$@"

@@ -1,56 +1,41 @@
-# Креды БД - НЕ коммитим!
+# Credentials — never commit
 .db.yaml
 .db-testing.yaml
+.env
 
-# Виртуальное окружение Python
+# Dependency directories
+node_modules/
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Build output (shipped on the dist branch by CI)
+build/
+dist/
+out/
+
+# Test coverage
+coverage/
+
+# Logs
+*.log
+
+# Legacy Python runtime (local leftovers)
 venv/
 env/
 .venv/
-
-# Логи
-*.log
-mcp-db-server.log
-
-# Python cache
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
+.pytest_cache/
 
-# IDE
+# IDE / agents
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
 *~
 
-# OS
+# OS generated files
 .DS_Store
 Thumbs.db
-
-# Temporary files
-*.tmp
-*.temp
-.cache/ 
-mcp-db-server.log
-.env
-.pytest_cache/

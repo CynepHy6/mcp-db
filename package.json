@@ -1,0 +1,58 @@
+{
+    "name": "mcp-db",
+    "version": "1.0.0",
+    "description": "MCP server for PostgreSQL and MySQL: prod replicas (database-enforced read-only) and testing stands from local YAML configs",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/CynepHy6/mcp-db.git"
+    },
+    "bugs": {
+        "url": "https://github.com/CynepHy6/mcp-db/issues"
+    },
+    "homepage": "https://github.com/CynepHy6/mcp-db#readme",
+    "main": "build/index.js",
+    "type": "module",
+    "bin": {
+        "mcp-db": "./build/index.js"
+    },
+    "scripts": {
+        "compile": "tsc && node -e \"require('fs').chmodSync('build/index.js', '755')\"",
+        "prepublishOnly": "npm run compile",
+        "start": "node ./build/index.js",
+        "test": "jest",
+        "test:watch": "jest --watch",
+        "test:coverage": "jest --coverage"
+    },
+    "files": [
+        "build",
+        "LICENSE"
+    ],
+    "keywords": [
+        "mcp",
+        "postgres",
+        "mysql",
+        "database",
+        "cursor",
+        "npx"
+    ],
+    "author": "",
+    "license": "Apache-2.0",
+    "engines": {
+        "node": ">=18"
+    },
+    "devDependencies": {
+        "@types/jest": "^29.5.0",
+        "@types/node": "^22.10.0",
+        "@types/pg": "^8.11.0",
+        "jest": "^29.5.0",
+        "ts-jest": "^29.1.0",
+        "typescript": "^5.7.2"
+    },
+    "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.15.0",
+        "mysql2": "^3.11.0",
+        "pg": "^8.13.0",
+        "yaml": "^2.6.0",
+        "zod": "^3.24.2"
+    }
+}
