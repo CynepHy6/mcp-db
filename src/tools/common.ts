@@ -15,6 +15,8 @@ export const testingDescription = (): string =>
         ? "Стенд test-yNN / sN / qa-panel yNN. Если не передан — TESTING_NAME. " +
           "Явный testing побеждает (в том числе чужой стенд во внутреннем контуре)"
         : "Имя тестинга/стейджинга (test-y10, test-alpha, my-env, s2). " +
+          "prod — prod-реплика из .db.yaml (read-only), даже если задан TESTING_NAME; " +
+          "без testing — TESTING_NAME, а если он не задан — prod. " +
           "qa-panel shortName yNN (y10) — алиас для test-yNN. " +
           "При указании подключение строится из .db-testing.yaml. " +
           "Стейджинги (s2, s6, ...) резолвятся через staging_host_template, если он задан; " +

@@ -7,7 +7,8 @@ MCP user-DB: prod-реплики и тестинги Skyeng Platform.
 Параметры:
 - service — имя сервиса/БД (crm, timetable, learning_groups_storage, …)
 - testing — имя окружения для тестинга (test-y10, test-alpha, my-env, …);
-  shortName qa-panel yNN (y10) принимается как алиас test-yNN; без testing = prod (read-only)
+  shortName qa-panel yNN (y10) принимается как алиас test-yNN.
+  testing="prod" — prod-реплика (read-only). Без testing — TESTING_NAME, а если он не задан — prod
 - timeout — лимит выполнения SQL в секундах (по умолчанию 30; 0 = без лимита). При timeout
   оптимизируй запрос (WHERE/LIMIT/индексы), не поднимай лимит без нужды.
 

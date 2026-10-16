@@ -2,7 +2,7 @@
 
 MCP-сервер (stdio) для PostgreSQL и MySQL в Cursor и Claude Code: prod-реплики и тестинги Skyeng Platform. Креды лежат в локальных YAML и никуда не уходят.
 
-- **Prod** (без `testing`) — только чтение. Каждый запрос идёт в read-only транзакции на стороне БД, запись отклоняет сама БД.
+- **Prod** (без `testing` или `testing: "prod"`) — только чтение. Каждый запрос идёт в read-only транзакции на стороне БД, запись отклоняет сама БД.
 - **Тестинг и стейджинг** (`testing` задан) — любые SQL.
 
 ## Быстрый старт (npx, без клона)
@@ -59,7 +59,7 @@ cp .db-testing.yaml.example .db-testing.yaml   # заполнить креды
 |------------|--------------|-----------|
 | `MCP_DB_CONFIG` | `<корень пакета>/.db.yaml` | prod-каталог. Файла нет или он не объект — сервер не стартует. Пустой каталог — `{}` |
 | `MCP_DB_TESTING_CONFIG` | `.db-testing.yaml` рядом с prod-конфигом | каталог тестингов. Необязателен; ошибка в нём видна в ответе каждого вызова с `testing`, prod работает |
-| `TESTING_NAME` | — | стенд, если `testing` в вызове не передан. Заданный `TESTING_NAME` уводит вызовы без `testing` на этот стенд, prod тогда недоступен |
+| `TESTING_NAME` | — | стенд, если `testing` в вызове не передан. Заданный `TESTING_NAME` уводит вызовы без `testing` на этот стенд; prod тогда — явный `testing: "prod"` |
 | `MCP_DB_TESTING_ONLY` | выкл. | `1`/`true`/`yes`/`on`: prod-каталог не открывается, вызов без стенда — ошибка; свой текст instructions и описаний tools |
 | `MCP_DB_LIST_PROBE` | вкл., при `MCP_DB_TESTING_ONLY` — выкл. | `list_databases` подключается к каждой БД. Выключено — каталог без TCP (`available: null`, `probed: false`) |
 | `MCP_DB_CONNECT_TIMEOUT` | `2` | таймаут подключения, секунды |

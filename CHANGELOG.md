@@ -2,6 +2,12 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/); нумерация версий — [Semantic Versioning](https://semver.org/lang/ru/).
 
+## [1.1.0] - 2026-10-16
+
+### Добавлено
+
+- `testing: "prod"` выбирает prod-каталог из `MCP_DB_CONFIG`, даже если задан `TESTING_NAME`. Без этого при заданном `TESTING_NAME` вызов без `testing` уходил на стенд и prod был недоступен. В режиме `MCP_DB_TESTING_ONLY` `prod` отклоняется той же ошибкой, что и раньше.
+
 ## [1.0.0] - 2026-10-16
 
 Сервер переписан с Python на TypeScript. Запуск — `npx -y github:CynepHy6/mcp-db#semver:^1` или `./mcp-server` из клона; venv и `requirements-mcp.txt` больше не нужны.

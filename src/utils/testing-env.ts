@@ -15,8 +15,20 @@ export const testingEnvSuffix = (testing: string): string =>
 
 export const isStagingEnv = (testing: string): boolean => STAGING_ENV_PATTERN.test(testing);
 
-/** Explicit testing wins; otherwise TESTING_NAME. An empty string counts as not set. */
+/** Explicit `testing: "prod"` selects the prod catalog even when TESTING_NAME is set. */
+export const PROD_TESTING_VALUE = "prod";
+
+export const isProdTesting = (testing?: string | null): boolean =>
+    typeof testing === "string" && testing.trim().toLowerCase() === PROD_TESTING_VALUE;
+
+/**
+ * Explicit testing wins; otherwise TESTING_NAME. An empty string counts as not set.
+ * `prod` returns null: the caller asked for the prod catalog, not a stand.
+ */
 export const coerceTesting = (testing?: string | null): string | null => {
+    if (isProdTesting(testing)) {
+        return null;
+    }
     const raw = testing !== undefined && testing !== null && testing !== "" ? testing : defaultTestingFromEnv();
     if (!raw) {
         return null;

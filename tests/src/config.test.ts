@@ -254,6 +254,12 @@ describe("stand names", () => {
         expect(coerceTesting("")).toBe("test-y12");
         expect(coerceTesting("test-y99")).toBe("test-y99");
     });
+
+    it("coerceTesting: prod selects the prod catalog even with TESTING_NAME", () => {
+        process.env.TESTING_NAME = "y12";
+        expect(coerceTesting("prod")).toBeNull();
+        expect(coerceTesting(" PROD ")).toBeNull();
+    });
 });
 
 describe("env", () => {
