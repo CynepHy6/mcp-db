@@ -37,6 +37,11 @@ jest.mock("mysql2/promise", () => ({
     __esModule: true,
     default: {
         createConnection: async (config: any) => {
+            const refuse = (globalThis as any).__mysqlRefuse as ((config: any) => string | null) | undefined;
+            const code = refuse ? refuse(config) : null;
+            if (code) {
+                throw Object.assign(new Error(code), { code });
+            }
             const connection = {
                 config,
                 queries: [] as any[],
@@ -149,6 +154,42 @@ describe("postgres session", () => {
 });
 
 describe("mysql session", () => {
+    afterEach(() => {
+        delete (globalThis as any).__mysqlRefuse;
+    });
+
+    it("connects over TLS first", async () => {
+        await runSession(mysqlConn, prodOptions, (s) => s.query("SELECT 1 AS ok"));
+        expect(mysqlConnections).toHaveLength(1);
+        expect(mysqlConnections[0].config.ssl).toEqual({ rejectUnauthorized: false });
+    });
+
+    it("falls back to plain TCP when the server has no TLS", async () => {
+        (globalThis as any).__mysqlRefuse = (config: any) => (config.ssl ? "HANDSHAKE_NO_SSL_SUPPORT" : null);
+        await runSession(mysqlConn, prodOptions, (s) => s.query("SELECT 1 AS ok"));
+        expect(mysqlConnections).toHaveLength(1);
+        expect(mysqlConnections[0].config.ssl).toBeUndefined();
+    });
+
+    it("keeps the TLS error when the plain retry fails too", async () => {
+        (globalThis as any).__mysqlRefuse = (config: any) => (config.ssl ? "ER_ACCESS_DENIED_ERROR" : "ECONNRESET");
+        await expect(runSession(mysqlConn, prodOptions, (s) => s.query("SELECT 1"))).rejects.toMatchObject({
+            code: "ER_ACCESS_DENIED_ERROR",
+        });
+    });
+
+    it("does not retry a timeout", async () => {
+        let calls = 0;
+        (globalThis as any).__mysqlRefuse = () => {
+            calls += 1;
+            return "ETIMEDOUT";
+        };
+        await expect(runSession(mysqlConn, prodOptions, (s) => s.query("SELECT 1"))).rejects.toMatchObject({
+            code: "ETIMEDOUT",
+        });
+        expect(calls).toBe(1);
+    });
+
     it("wraps a prod session in START TRANSACTION READ ONLY … ROLLBACK", async () => {
         const result = await runSession(mysqlConn, prodOptions, (s) => s.query("SELECT 1 AS ok"));
 

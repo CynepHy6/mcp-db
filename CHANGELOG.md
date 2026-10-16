@@ -2,6 +2,12 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/); нумерация версий — [Semantic Versioning](https://semver.org/lang/ru/).
 
+## [1.1.2] - 2026-10-16
+
+### Исправлено
+
+- MySQL подключается сначала по TLS без проверки сертификата, при отказе — без TLS, как Postgres (`sslmode=prefer`). Учётки реплик, которые требуют TLS, без него получали `Access denied`.
+
 ## [1.1.1] - 2026-10-16
 
 ### Исправлено
