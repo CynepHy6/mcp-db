@@ -1,0 +1,45 @@
+{
+    "name": "mcp-db",
+    "version": "1.1.1",
+    "description": "MCP server for PostgreSQL and MySQL: prod replicas (database-enforced read-only) and testing stands from local YAML configs",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/CynepHy6/mcp-db.git"
+    },
+    "bugs": {
+        "url": "https://github.com/CynepHy6/mcp-db/issues"
+    },
+    "homepage": "https://github.com/CynepHy6/mcp-db#readme",
+    "main": "build/index.js",
+    "type": "module",
+    "bin": {
+        "mcp-db": "./build/index.js"
+    },
+    "scripts": {
+        "start": "node ./build/index.js"
+    },
+    "files": [
+        "build",
+        "LICENSE"
+    ],
+    "keywords": [
+        "mcp",
+        "postgres",
+        "mysql",
+        "database",
+        "cursor",
+        "npx"
+    ],
+    "author": "",
+    "license": "Apache-2.0",
+    "engines": {
+        "node": ">=18"
+    },
+    "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.15.0",
+        "mysql2": "^3.11.0",
+        "pg": "^8.13.0",
+        "yaml": "^2.6.0",
+        "zod": "^3.24.2"
+    }
+}
