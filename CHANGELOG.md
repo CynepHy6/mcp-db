@@ -2,6 +2,12 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/); нумерация версий — [Semantic Versioning](https://semver.org/lang/ru/).
 
+## [1.1.1] - 2026-10-16
+
+### Исправлено
+
+- `testing: "prod"` при заданном `TESTING_NAME` уходил на стенд: значение приводилось к стенду дважды, и второй раз пустой `prod` снова заменялся на `TESTING_NAME`. Теперь `execute_query`, `get_database_info` и `get_tables_schemas` с `prod` идут в prod-каталог.
+
 ## [1.1.0] - 2026-10-16
 
 ### Добавлено

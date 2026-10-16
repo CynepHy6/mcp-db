@@ -1,6 +1,6 @@
 {
     "name": "mcp-db",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "description": "MCP server for PostgreSQL and MySQL: prod replicas (database-enforced read-only) and testing stands from local YAML configs",
     "repository": {
         "type": "git",

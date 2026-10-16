@@ -140,6 +140,21 @@ describe("executeQuery", () => {
         await manager.executeQuery("SELECT 1", "trm", "test-y99");
         expect(calls[1].conn.host).toBe("test-y99-local.example.test");
     });
+
+    it("testing=prod reaches prod in a read-only session even with TESTING_NAME", async () => {
+        process.env.TESTING_NAME = "y12";
+        const { runner, calls } = fakeRunner(() => ({ rows: [{ ok: 1 }], hasResultSet: true }));
+        const manager = createManager(PROD_CONFIG, TESTING_CONFIG, { runSession: runner });
+
+        const result = await manager.executeQuery("SELECT 1 AS ok", "prod_db", "prod");
+        expect(result).toMatchObject({ success: true, testing: null, database: "prod_db" });
+        expect(calls[0].options.readOnly).toBe(true);
+        expect(calls[0].conn.host).not.toContain("test-y12");
+
+        const info = await manager.getDatabaseInfo("prod_db", "prod");
+        expect(info).toMatchObject({ testing: null });
+        expect(calls[1].options.readOnly).toBe(true);
+    });
 });
 
 describe("testing-only mode", () => {

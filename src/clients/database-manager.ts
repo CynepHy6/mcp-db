@@ -149,7 +149,14 @@ export class DatabaseManager {
 
     /** [logical key, connection] for prod or a testing stand; testing falls back to TESTING_NAME. */
     resolveTarget(service: string, testing?: string | null): [string, ConnectionConfig] {
-        const env = coerceTesting(testing);
+        return this.resolveCoercedTarget(service, coerceTesting(testing));
+    }
+
+    /**
+     * Same as resolveTarget for a stand that coerceTesting already resolved: null means prod.
+     * Coercing twice would turn an explicit `prod` (null) back into TESTING_NAME.
+     */
+    private resolveCoercedTarget(service: string, env: string | null): [string, ConnectionConfig] {
         if (env) {
             return [`${service}@${env}`, this.resolveTestingConnection(env, service)];
         }
@@ -319,7 +326,7 @@ export class DatabaseManager {
         let key: string;
         let conn: ConnectionConfig;
         try {
-            [key, conn] = this.resolveTarget(service, env);
+            [key, conn] = this.resolveCoercedTarget(service, env);
         } catch (error) {
             return {
                 success: false,
@@ -380,7 +387,7 @@ export class DatabaseManager {
         let key: string;
         let conn: ConnectionConfig;
         try {
-            [key, conn] = this.resolveTarget(service, env);
+            [key, conn] = this.resolveCoercedTarget(service, env);
         } catch (error) {
             return { success: false, error: errorMessage(error), service, testing: env };
         }
@@ -421,7 +428,7 @@ export class DatabaseManager {
         let key: string;
         let conn: ConnectionConfig;
         try {
-            [key, conn] = this.resolveTarget(service, env);
+            [key, conn] = this.resolveCoercedTarget(service, env);
         } catch (error) {
             return { success: false, error: errorMessage(error), service, testing: env };
         }
