@@ -150,6 +150,8 @@ describe("postgres session", () => {
         expect(pgTypeParser(20)("42")).toBe(42);
         expect(pgTypeParser(20)("9223372036854775807")).toBe("9223372036854775807");
         expect(pgTypeParser(1184)("2026-10-16 08:00:00+00")).toBe("2026-10-16 08:00:00+00");
+        expect(pgTypeParser(1186)("-00:00:00.009614")).toBe("-00:00:00.009614");
+        expect(pgTypeParser(1186)("1 day 02:03:04")).toBe("1 day 02:03:04");
     });
 });
 

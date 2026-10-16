@@ -2,6 +2,12 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/); нумерация версий — [Semantic Versioning](https://semver.org/lang/ru/).
 
+## [1.1.3] - 2026-10-16
+
+### Исправлено
+
+- PostgreSQL `interval` возвращается текстом сервера (`1 day 02:03:04`), а не объектом `{ "milliseconds": … }`. Массивы дат, времени, timestamp и interval — списком строк сервера, без перевода в JS Date.
+
 ## [1.1.2] - 2026-10-16
 
 ### Исправлено

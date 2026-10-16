@@ -3,8 +3,14 @@ import type { ConnectionConfig } from "../utils/config.js";
 import type { DbSession, QueryResult, SessionOptions } from "./db-session.js";
 
 const INT8_OID = 20;
-/** date, time, timestamp, timestamptz, timetz: the server text, no JS Date round-trip through the local zone. */
-const RAW_TEXT_OIDS = new Set([1082, 1083, 1114, 1184, 1266]);
+/**
+ * date, time, timestamp, timestamptz, interval, timetz: the server text. No JS Date round-trip through
+ * the local zone, and no `{ milliseconds: … }` object for an interval.
+ */
+const RAW_TEXT_OIDS = new Set([1082, 1083, 1114, 1184, 1186, 1266]);
+/** Arrays of the same types: a list of server strings, parsed like text[]. */
+const RAW_TEXT_ARRAY_OIDS = new Set([1182, 1183, 1115, 1185, 1187, 1270]);
+const TEXT_ARRAY_OID: number = 1009;
 
 export const pgTypeParser = (oid: number, format?: any): ((value: string) => unknown) => {
     if (oid === INT8_OID) {
@@ -15,6 +21,9 @@ export const pgTypeParser = (oid: number, format?: any): ((value: string) => unk
     }
     if (RAW_TEXT_OIDS.has(oid)) {
         return (value: string) => value;
+    }
+    if (RAW_TEXT_ARRAY_OIDS.has(oid)) {
+        return pg.types.getTypeParser(TEXT_ARRAY_OID, format) as (value: string) => unknown;
     }
     return pg.types.getTypeParser(oid, format) as (value: string) => unknown;
 };
