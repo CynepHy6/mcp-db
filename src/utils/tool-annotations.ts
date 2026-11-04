@@ -5,12 +5,12 @@ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
  * спрашивать ли человека и пускать ли вызов в режимах только чтения. Без аннотации клиент угадывает
  * по имени. Аннотация статична на весь сервер, поэтому пометка — по худшему случаю среди конфигов.
  */
-const READ_ONLY: ToolAnnotations = { readOnlyHint: true, openWorldHint: false };
+const READ_ONLY: ToolAnnotations = { readOnlyHint: true, openWorldHint: true };
 /**
  * Read-only гарантирован только на prod (`BEGIN READ ONLY` / `START TRANSACTION READ ONLY`).
  * На тестинге и стейджинге запрос идёт без фильтра и коммитится: INSERT, UPDATE, DELETE, DDL.
  */
-const DESTRUCTIVE: ToolAnnotations = { readOnlyHint: false, destructiveHint: true, openWorldHint: false };
+const DESTRUCTIVE: ToolAnnotations = { readOnlyHint: false, destructiveHint: true, openWorldHint: true };
 
 export const TOOL_ANNOTATIONS: Record<string, ToolAnnotations> = {
     execute_query: DESTRUCTIVE,
