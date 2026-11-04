@@ -2,6 +2,12 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/); нумерация версий — [Semantic Versioning](https://semver.org/lang/ru/).
 
+## [1.2.0] - 2026-11-04
+
+### Добавлено
+
+- У каждого инструмента есть MCP-аннотации: `readOnlyHint: true` у `get_tables_schemas`, `list_databases` и `get_database_info` (только служебные SELECT), `readOnlyHint: false` и `destructiveHint: true` у `execute_query`: на prod он читает в read-only транзакции, но на тестинге и стейджинге выполняет любой SQL с COMMIT, а аннотация одна на весь сервер. Клиент больше не угадывает по имени: читающие инструменты идут без вопроса человеку, `execute_query` — с вопросом.
+
 ## [1.1.3] - 2026-10-16
 
 ### Исправлено

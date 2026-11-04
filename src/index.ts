@@ -19,6 +19,7 @@ import { connectTimeoutSec, defaultQueryTimeoutSec } from "./utils/env.js";
 import { logger } from "./utils/logger.js";
 import { mcpServerInstructions } from "./utils/mcp-server-instructions.js";
 import { coerceTesting } from "./utils/testing-env.js";
+import { toolAnnotations } from "./utils/tool-annotations.js";
 
 const __filename = fileURLToPath(import.meta.url);
 /** Package root: the default `.db.yaml` of a local clone lives here. */
@@ -99,18 +100,32 @@ const startServer = async (manager: DatabaseManager): Promise<void> => {
         { capabilities: { tools: {} }, instructions: mcpServerInstructions() },
     );
 
-    server.tool("execute_query", executeQueryDescription(), executeQuerySchema(), executeQueryHandler(manager) as any);
+    server.tool(
+        "execute_query",
+        executeQueryDescription(),
+        executeQuerySchema(),
+        toolAnnotations("execute_query"),
+        executeQueryHandler(manager) as any,
+    );
     server.tool(
         "get_tables_schemas",
         getTablesSchemasDescription(),
         getTablesSchemasSchema(),
+        toolAnnotations("get_tables_schemas"),
         getTablesSchemasHandler(manager) as any,
     );
-    server.tool("list_databases", listDatabasesDescription(), listDatabasesSchema(), listDatabasesHandler(manager) as any);
+    server.tool(
+        "list_databases",
+        listDatabasesDescription(),
+        listDatabasesSchema(),
+        toolAnnotations("list_databases"),
+        listDatabasesHandler(manager) as any,
+    );
     server.tool(
         "get_database_info",
         getDatabaseInfoDescription(),
         getDatabaseInfoSchema(),
+        toolAnnotations("get_database_info"),
         getDatabaseInfoHandler(manager) as any,
     );
 
